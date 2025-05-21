@@ -1,0 +1,6 @@
+aiohttp>=3.8.0
+bleak>=0.19.0
+bleak-retry-connector>=1.0.0
+ecdsa>=0.18.0
+pycryptodome>=3.18.0
+brotli
