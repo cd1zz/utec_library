@@ -64,6 +64,7 @@ class UtecClient(BaseUtecClient):
         self.email: str = email
         self.password: str = password
         self.session = session
+        self._session_owned = session is None  # Track if we own the session
         self.token: Optional[str] = None
         self.timeout: int = config.api_timeout
         self.addresses: List[Dict[str, Any]] = []
@@ -79,6 +80,27 @@ class UtecClient(BaseUtecClient):
         """
         letters_nums = string.ascii_uppercase + string.digits
         self.mobile_uuid = "".join(secrets.choice(letters_nums) for i in range(length))
+
+    async def __aenter__(self):
+        """Async context manager entry."""
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit."""
+        await self.close()
+
+    async def close(self) -> None:
+        """Close the client session if we own it."""
+        if self.session and self._session_owned:
+            await self.session.close()
+            self.session = None
+
+    async def _ensure_session(self) -> ClientSession:
+        """Ensure we have a session available."""
+        if not self.session:
+            self.session = ClientSession()
+            self._session_owned = True
+        return self.session
 
     async def _fetch_token(self) -> None:
         """Fetch the token that is used to log into the app.
@@ -271,12 +293,10 @@ class UtecClient(BaseUtecClient):
         """
         logger.debug(f"Making POST request to {url}")
         
-        if not self.session:
-            logger.debug("Creating new aiohttp session")
-            self.session = ClientSession()
+        session = await self._ensure_session()
 
         try:
-            async with self.session.post(
+            async with session.post(
                 url, headers=headers, data=data, timeout=self.timeout
             ) as resp:
                 if resp.status != 200:
@@ -350,10 +370,12 @@ class UtecClient(BaseUtecClient):
         self.devices = []
         
         try:
-            connected = await self.connect()
-            if not connected:
-                logger.error("Failed to connect, cannot sync devices")
-                return False
+            # Check if we're already connected
+            if not self.token:
+                connected = await self.connect()
+                if not connected:
+                    logger.error("Failed to connect, cannot sync devices")
+                    return False
                 
             await self._get_addresses()
             logger.info(f"Found {len(self.addresses)} addresses")

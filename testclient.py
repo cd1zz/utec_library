@@ -43,8 +43,8 @@ class MyUtecClient:
             ble_max_retries=3         # Match your previous max attempts
         )
         
-        # Create the client
-        self.client = utec.UtecClient(email, password)
+        # Create the client - will be set properly in async context manager
+        self._client = None
         
         # BLE device scanning setup
         self.scanner = BleakScanner()
@@ -52,6 +52,23 @@ class MyUtecClient:
         self._scanner_lock = asyncio.Lock()
         self._last_scan_time = 0
         self._scan_cache_ttl = 30  # seconds
+
+    async def __aenter__(self):
+        """Async context manager entry."""
+        self._client = utec.UtecClient(self.email, self.password)
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit."""
+        if self._client:
+            await self._client.close()
+
+    @property
+    def client(self):
+        """Get the client instance."""
+        if self._client is None:
+            raise RuntimeError("Client must be used within an async context manager")
+        return self._client
 
     async def connect(self) -> bool:
         """Connect to the U-tec cloud service."""
@@ -234,6 +251,108 @@ class MyUtecClient:
             logger.error(f"Failed to reset Bluetooth scanner: {e}")
 
 
+async def run_client_operations(email: str, password: str, args):
+    """Run client operations within proper context manager."""
+    async with MyUtecClient(email, password) as client:
+        # Connect to U-tec cloud
+        if not await client.connect():
+            logger.error("Failed to connect to U-tec cloud")
+            return
+        
+        # Get locks
+        locks = await client.get_locks()
+        
+        if args.all:
+            # Get info for all locks
+            for lock in locks:
+                try:
+                    info = await client.get_lock_info(lock)
+                    print(f"Lock: {info['name']}")
+                    print(f"  MAC Address: {info['mac_address']}")
+                    print(f"  Model: {info['model']}")
+                    print(f"  Battery: {info['battery']}%")
+                    print(f"  Lock Status: {info['lock_status']}")
+                    print(f"  Bolt Status: {info['bolt_status']}")
+                    print(f"  Lock Mode: {info['lock_mode']}")
+                    print(f"  Autolock Time: {info['autolock_time']} seconds")
+                    print(f"  Mute: {info['mute']}")
+                    print(f"  Serial Number: {info['serial_number']}")
+                    print()
+                except Exception:
+                    # Error already logged in get_lock_info
+                    continue
+        elif args.name:
+            # Find lock with given name
+            lock = next((l for l in locks if l.name.lower() == args.name.lower()), None)
+            if not lock:
+                logger.error(f"Lock with name '{args.name}' not found")
+                return
+            
+            # Perform action
+            if args.info:
+                # Get info for lock
+                try:
+                    info = await client.get_lock_info(lock)
+                    print(f"Lock: {info['name']}")
+                    print(f"  MAC Address: {info['mac_address']}")
+                    print(f"  Model: {info['model']}")
+                    print(f"  Battery: {info['battery']}%")
+                    print(f"  Lock Status: {info['lock_status']}")
+                    print(f"  Bolt Status: {info['bolt_status']}")
+                    print(f"  Lock Mode: {info['lock_mode']}")
+                    print(f"  Autolock Time: {info['autolock_time']} seconds")
+                    print(f"  Mute: {info['mute']}")
+                    print(f"  Serial Number: {info['serial_number']}")
+                except Exception:
+                    # Error already logged in get_lock_info
+                    pass
+            elif args.unlock:
+                # Unlock lock
+                success = await client.unlock_lock(lock)
+                if success:
+                    print(f"Unlocked lock: {lock.name}")
+                else:
+                    print(f"Failed to unlock lock: {lock.name}")
+            elif args.lock:
+                # Lock lock
+                success = await client.lock_lock(lock)
+                if success:
+                    print(f"Locked lock: {lock.name}")
+                else:
+                    print(f"Failed to lock lock: {lock.name}")
+            elif args.autolock is not None:
+                # Set autolock time
+                success = await client.set_autolock(lock, args.autolock)
+                if success:
+                    print(f"Set autolock time for lock: {lock.name} to {args.autolock} seconds")
+                else:
+                    print(f"Failed to set autolock time for lock: {lock.name}")
+        else:
+            # No action specified
+            logger.info(f"Found {len(locks)} locks:")
+            for lock in locks:
+                print(f"  {lock.name} ({lock.model})")
+            
+            # If only one lock is available, get info for it
+            if len(locks) == 1:
+                try:
+                    lock = locks[0]
+                    info = await client.get_lock_info(lock)
+                    print(f"\nLock: {info['name']}")
+                    print(f"  MAC Address: {info['mac_address']}")
+                    print(f"  Model: {info['model']}")
+                    print(f"  Battery: {info['battery']}%")
+                    print(f"  Lock Status: {info['lock_status']}")
+                    print(f"  Bolt Status: {info['bolt_status']}")
+                    print(f"  Lock Mode: {info['lock_mode']}")
+                    print(f"  Autolock Time: {info['autolock_time']} seconds")
+                    print(f"  Mute: {info['mute']}")
+                    print(f"  Serial Number: {info['serial_number']}")
+                except Exception as e:
+                    logger.error(f"Fatal error in main")
+                    logger.error(e)
+
+
 async def main():
     """Main function."""
     parser = argparse.ArgumentParser(description="U-tec Client")
@@ -275,106 +394,8 @@ async def main():
         logger.error("Email and password are required")
         return
     
-    # Create client
-    client = MyUtecClient(email, password)
-    
-    # Connect to U-tec cloud
-    if not await client.connect():
-        logger.error("Failed to connect to U-tec cloud")
-        return
-    
-    # Get locks
-    locks = await client.get_locks()
-    
-    if args.all:
-        # Get info for all locks
-        for lock in locks:
-            try:
-                info = await client.get_lock_info(lock)
-                print(f"Lock: {info['name']}")
-                print(f"  MAC Address: {info['mac_address']}")
-                print(f"  Model: {info['model']}")
-                print(f"  Battery: {info['battery']}%")
-                print(f"  Lock Status: {info['lock_status']}")
-                print(f"  Bolt Status: {info['bolt_status']}")
-                print(f"  Lock Mode: {info['lock_mode']}")
-                print(f"  Autolock Time: {info['autolock_time']} seconds")
-                print(f"  Mute: {info['mute']}")
-                print(f"  Serial Number: {info['serial_number']}")
-                print()
-            except Exception:
-                # Error already logged in get_lock_info
-                continue
-    elif args.name:
-        # Find lock with given name
-        lock = next((l for l in locks if l.name.lower() == args.name.lower()), None)
-        if not lock:
-            logger.error(f"Lock with name '{args.name}' not found")
-            return
-        
-        # Perform action
-        if args.info:
-            # Get info for lock
-            try:
-                info = await client.get_lock_info(lock)
-                print(f"Lock: {info['name']}")
-                print(f"  MAC Address: {info['mac_address']}")
-                print(f"  Model: {info['model']}")
-                print(f"  Battery: {info['battery']}%")
-                print(f"  Lock Status: {info['lock_status']}")
-                print(f"  Bolt Status: {info['bolt_status']}")
-                print(f"  Lock Mode: {info['lock_mode']}")
-                print(f"  Autolock Time: {info['autolock_time']} seconds")
-                print(f"  Mute: {info['mute']}")
-                print(f"  Serial Number: {info['serial_number']}")
-            except Exception:
-                # Error already logged in get_lock_info
-                pass
-        elif args.unlock:
-            # Unlock lock
-            success = await client.unlock_lock(lock)
-            if success:
-                print(f"Unlocked lock: {lock.name}")
-            else:
-                print(f"Failed to unlock lock: {lock.name}")
-        elif args.lock:
-            # Lock lock
-            success = await client.lock_lock(lock)
-            if success:
-                print(f"Locked lock: {lock.name}")
-            else:
-                print(f"Failed to lock lock: {lock.name}")
-        elif args.autolock is not None:
-            # Set autolock time
-            success = await client.set_autolock(lock, args.autolock)
-            if success:
-                print(f"Set autolock time for lock: {lock.name} to {args.autolock} seconds")
-            else:
-                print(f"Failed to set autolock time for lock: {lock.name}")
-    else:
-        # No action specified
-        logger.info(f"Found {len(locks)} locks:")
-        for lock in locks:
-            print(f"  {lock.name} ({lock.model})")
-        
-        # If only one lock is available, get info for it
-        if len(locks) == 1:
-            try:
-                lock = locks[0]
-                info = await client.get_lock_info(lock)
-                print(f"\nLock: {info['name']}")
-                print(f"  MAC Address: {info['mac_address']}")
-                print(f"  Model: {info['model']}")
-                print(f"  Battery: {info['battery']}%")
-                print(f"  Lock Status: {info['lock_status']}")
-                print(f"  Bolt Status: {info['bolt_status']}")
-                print(f"  Lock Mode: {info['lock_mode']}")
-                print(f"  Autolock Time: {info['autolock_time']} seconds")
-                print(f"  Mute: {info['mute']}")
-                print(f"  Serial Number: {info['serial_number']}")
-            except Exception as e:
-                logger.error(f"Fatal error in main")
-                logger.error(e)
+    # Run all operations within the proper context manager
+    await run_client_operations(email, password, args)
 
 
 if __name__ == "__main__":
