@@ -21,7 +21,7 @@ from Crypto.Cipher import AES
 from ..abstract import BaseBleDevice, BaseBleRequest, BLEDeviceCallback, ErrorCallback
 
 # Import from configuration
-from ..config import config
+from ..config import config, LogLevel
 
 # Create a logger for this module
 logger = config.get_logger("ble.device")
@@ -187,7 +187,7 @@ class UtecBleDevice(BaseBleDevice):
             msg: Message to log.
             *args: Additional arguments for formatting.
         """
-        if logger.level <= config.LogLevel.DEBUG.value:
+        if logger.level <= LogLevel.DEBUG.value:
             if args:
                 logger.debug(msg, *args)
             else:

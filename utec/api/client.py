@@ -364,19 +364,17 @@ class UtecClient(BaseUtecClient):
         """
         logger.info("Starting device sync...")
         
+        # Check if we have a valid token first
+        if not self.token:
+            logger.error("No authentication token available. Call connect() first.")
+            return False
+        
         # Clear previous data
         self.addresses = []
         self.rooms = []
         self.devices = []
         
         try:
-            # Check if we're already connected
-            if not self.token:
-                connected = await self.connect()
-                if not connected:
-                    logger.error("Failed to connect, cannot sync devices")
-                    return False
-                
             await self._get_addresses()
             logger.info(f"Found {len(self.addresses)} addresses")
             
@@ -411,11 +409,18 @@ class UtecClient(BaseUtecClient):
         """
         logger.info("Getting BLE devices...")
         
-        if sync:
-            await self.sync_devices()
+        # Only sync if explicitly requested AND we don't have devices
+        if sync and not self.devices:
+            if not await self.sync_devices():
+                logger.error("Failed to sync devices")
+                return []
+        elif not self.devices:
+            logger.warning("No device data available and sync=False")
+            return []
+        else:
+            logger.debug("Using cached device data")
 
         devices = []
-
         for api_device in self.devices:
             try:
                 # Use the factory to create the device
@@ -426,7 +431,7 @@ class UtecClient(BaseUtecClient):
                     logger.info(f"Found BLE device: {device.name} (Model: {device.model})")
                     devices.append(device)
                 else:
-                    logger.info(f"Device does not have Bluetooth capability: {device.name}")
+                    logger.debug(f"Device does not have Bluetooth capability: {device.name}")
                     
             except KeyError as e:
                 logger.error(f"KeyError while processing device: {e}")

@@ -38,12 +38,11 @@ class MyUtecClient:
         # Configure the library
         utec.setup(
             log_level=LogLevel.INFO,
-            ble_scan_cache_ttl=30.0,  # Match previous cache TTL
-            ble_retry_delay=2.0,      # Slightly increased retry delay
-            ble_max_retries=3         # Match your previous max attempts
+            ble_scan_cache_ttl=30.0,
+            ble_retry_delay=2.0,
+            ble_max_retries=3
         )
         
-        # Create the client - will be set properly in async context manager
         self._client = None
         
         # BLE device scanning setup
@@ -70,25 +69,33 @@ class MyUtecClient:
             raise RuntimeError("Client must be used within an async context manager")
         return self._client
 
-    async def connect(self) -> bool:
-        """Connect to the U-tec cloud service."""
+    async def connect_and_sync(self) -> bool:
+        """Connect to the U-tec cloud service and sync devices."""
         logger.info("Connecting to U-tec cloud...")
         try:
-            return await self.client.connect()
+            if not await self.client.connect():
+                return False
+            
+            logger.info("Syncing devices...")
+            return await self.client.sync_devices()
         except Exception as e:
-            logger.error(f"Failed to connect to U-tec cloud: {e}")
+            logger.error(f"Failed to connect or sync: {e}")
             return False
 
-    async def get_locks(self) -> List[BaseLock]:
+    async def get_locks(self, sync: bool = False) -> List[BaseLock]:
         """Get all locks from the U-tec cloud."""
         try:
-            locks = await self.client.get_ble_devices()
-            logger.info(f"Found {len(locks)} locks")
+            locks = await self.client.get_ble_devices(sync=sync)
             
-            # Set the BLE device callback for each lock
-            for lock in locks:
-                lock.async_bledevice_callback = self.async_bledevice_callback
-                lock.error_callback = self.error_callback
+            if locks:
+                logger.info(f"Found {len(locks)} BLE-capable locks")
+                
+                # Set callbacks for all locks at once
+                for lock in locks:
+                    lock.async_bledevice_callback = self.async_bledevice_callback
+                    lock.error_callback = self.error_callback
+            else:
+                logger.warning("No BLE-capable locks found in your account")
                 
             return locks
         except Exception as e:
@@ -100,301 +107,241 @@ class MyUtecClient:
         if not address:
             return None
             
-        # Normalize address format
         address = address.upper()
+        current_time = time.time()
         
         # Check cache first
-        current_time = time.time()
         if address in self._device_cache:
             cache_time, device = self._device_cache[address]
             if current_time - cache_time < self._scan_cache_ttl:
                 logger.debug(f"Using cached device: {address}")
                 return device
         
-        # Use a lock to prevent multiple concurrent scans
         async with self._scanner_lock:
-            # If we recently did a scan, wait a bit
+            # Rate limiting
             if current_time - self._last_scan_time < 2:
                 await asyncio.sleep(2)
             
-            max_attempts = 3
-            for attempt in range(1, max_attempts + 1):
+            for attempt in range(1, 4):  # max 3 attempts
                 try:
-                    logger.info(f"Scanning for device: {address}, attempt {attempt}/{max_attempts}")
+                    logger.info(f"Scanning for {address} (attempt {attempt}/3)")
                     
-                    # Use discover which gets all devices at once (more reliable)
+                    # Primary method: discover all devices
                     all_devices = await BleakScanner.discover(timeout=8.0)
-                    
-                    # Check if our device is in the results
                     for device in all_devices:
-                        if device.address.upper() == address.upper():
+                        if device.address.upper() == address:
                             logger.info(f"Found device: {address} ({device.name})")
-                            
-                            # Update cache
                             self._device_cache[address] = (current_time, device)
                             self._last_scan_time = current_time
-                            
                             return device
                     
-                    # If not found via discover, try direct lookup as fallback
+                    # Fallback: direct lookup
                     try:
-                        logger.debug(f"Trying direct device lookup for: {address}")
                         device = await self.scanner.find_device_by_address(address)
                         if device:
-                            logger.info(f"Found device by direct lookup: {address}")
-                            
-                            # Update cache
+                            logger.info(f"Found device via direct lookup: {address}")
                             self._device_cache[address] = (current_time, device)
                             self._last_scan_time = current_time
-                            
                             return device
                     except Exception as e:
-                        logger.debug(f"Direct lookup failed: {str(e)}")
+                        logger.debug(f"Direct lookup failed: {e}")
                     
-                    logger.warning(f"Device {address} not found in attempt {attempt}")
-                    
-                    # Wait before next attempt
-                    if attempt < max_attempts:
+                    if attempt < 3:
                         await asyncio.sleep(3)
                         
                 except Exception as e:
-                    logger.error(f"Error in scan attempt {attempt}: {str(e)}")
+                    logger.error(f"Scan attempt {attempt} failed: {e}")
                     
-                    # For operation in progress errors, wait longer
                     if "Operation already in progress" in str(e):
-                        logger.info("Detected 'Operation already in progress', waiting...")
+                        logger.info("BLE operation in progress, waiting...")
                         await asyncio.sleep(10)
-                        
-                        # Try to reset the scanner
-                        try:
-                            self.scanner = BleakScanner()
-                        except Exception:
-                            pass
-                            
-                    elif attempt < max_attempts:
+                        self.scanner = BleakScanner()  # Reset scanner
+                    elif attempt < 3:
                         await asyncio.sleep(3)
             
             self._last_scan_time = current_time
-            logger.error(f"Failed to find device {address} after {max_attempts} attempts")
+            logger.error(f"Failed to find device {address} after 3 attempts")
             return None
 
     def error_callback(self, device_id: str, error: Exception) -> None:
         """Handle errors from the lock."""
         logger.error(f"Lock error ({device_id}): {error}")
 
+    def _format_lock_info(self, info: Dict[str, Any]) -> str:
+        """Format lock information for display."""
+        return f"""Lock: {info['name']}
+  MAC Address: {info['mac_address']}
+  Model: {info['model']}
+  Battery: {info['battery']}%
+  Lock Status: {info['lock_status']}
+  Bolt Status: {info['bolt_status']}
+  Lock Mode: {info['lock_mode']}
+  Autolock Time: {info['autolock_time']} seconds
+  Mute: {info['mute']}
+  Serial Number: {info['serial_number']}"""
+
     async def get_lock_info(self, lock: BaseLock) -> Dict[str, Any]:
         """Get information about a lock."""
-        logger.info(f"Getting information for lock: {lock.name}")
+        logger.info(f"Getting status for: {lock.name}")
+        await lock.async_update_status()
+        
+        return {
+            "name": lock.name,
+            "mac_address": lock.mac_uuid,
+            "model": lock.model,
+            "battery": lock.battery,
+            "lock_status": getattr(lock, "lock_status", -1),
+            "bolt_status": lock.bolt_status,
+            "lock_mode": lock.lock_mode,
+            "autolock_time": lock.autolock_time,
+            "mute": lock.mute,
+            "serial_number": lock.sn
+        }
+
+    async def _execute_lock_action(self, lock: BaseLock, action: str, *args) -> bool:
+        """Execute a lock action with unified error handling."""
+        logger.info(f"{action.title()} lock: {lock.name}")
         try:
-            await lock.async_update_status()
-            
-            return {
-                "name": lock.name,
-                "mac_address": lock.mac_uuid,
-                "model": lock.model,
-                "battery": lock.battery,
-                "lock_status": lock.lock_status if hasattr(lock, "lock_status") else -1,
-                "bolt_status": lock.bolt_status,
-                "lock_mode": lock.lock_mode,
-                "autolock_time": lock.autolock_time,
-                "mute": lock.mute,
-                "serial_number": lock.sn
-            }
+            if action == "unlock":
+                await lock.async_unlock()
+            elif action == "lock":
+                await lock.async_lock()
+            elif action == "set_autolock":
+                await lock.async_set_autolock(args[0])
+            else:
+                raise ValueError(f"Unknown action: {action}")
+            return True
         except Exception as e:
-            logger.error(f"Failed to get lock info: {lock.name}")
-            logger.error(f"Error: {e}")
-            raise
+            logger.error(f"Failed to {action} lock {lock.name}: {e}")
+            return False
 
     async def unlock_lock(self, lock: BaseLock) -> bool:
         """Unlock a lock."""
-        logger.info(f"Unlocking lock: {lock.name}")
-        try:
-            await lock.async_unlock()
-            return True
-        except Exception as e:
-            logger.error(f"Failed to unlock lock: {lock.name}")
-            logger.error(f"Error: {e}")
-            return False
+        return await self._execute_lock_action(lock, "unlock")
 
     async def lock_lock(self, lock: BaseLock) -> bool:
         """Lock a lock."""
-        logger.info(f"Locking lock: {lock.name}")
-        try:
-            await lock.async_lock()
-            return True
-        except Exception as e:
-            logger.error(f"Failed to lock lock: {lock.name}")
-            logger.error(f"Error: {e}")
-            return False
+        return await self._execute_lock_action(lock, "lock")
 
     async def set_autolock(self, lock: BaseLock, seconds: int) -> bool:
         """Set the autolock time for a lock."""
-        logger.info(f"Setting autolock time for lock: {lock.name} to {seconds} seconds")
-        try:
-            await lock.async_set_autolock(seconds)
-            return True
-        except Exception as e:
-            logger.error(f"Failed to set autolock time for lock: {lock.name}")
-            logger.error(f"Error: {e}")
-            return False
+        return await self._execute_lock_action(lock, "set_autolock", seconds)
 
-    async def reset_bluetooth(self) -> None:
-        """Reset the Bluetooth system if needed."""
-        logger.info("Resetting Bluetooth scanner")
-        try:
-            # Create a new scanner
-            self.scanner = BleakScanner()
-            # Clear device cache
-            self._device_cache = {}
-            self._last_scan_time = 0
-        except Exception as e:
-            logger.error(f"Failed to reset Bluetooth scanner: {e}")
+
+def find_lock_by_name(locks: List[BaseLock], name: str) -> Optional[BaseLock]:
+    """Find a lock by name (case-insensitive)."""
+    return next((l for l in locks if l.name.lower() == name.lower()), None)
+
+
+async def display_lock_info(client: MyUtecClient, lock: BaseLock) -> None:
+    """Display information for a single lock."""
+    try:
+        info = await client.get_lock_info(lock)
+        print(client._format_lock_info(info))
+    except Exception as e:
+        logger.error(f"Failed to get info for {lock.name}: {e}")
+
+
+async def display_all_locks_info(client: MyUtecClient, locks: List[BaseLock]) -> None:
+    """Display information for all locks."""
+    for i, lock in enumerate(locks):
+        await display_lock_info(client, lock)
+        if i < len(locks) - 1:  # Add separator between locks
+            print()
 
 
 async def run_client_operations(email: str, password: str, args):
     """Run client operations within proper context manager."""
     async with MyUtecClient(email, password) as client:
-        # Connect to U-tec cloud
-        if not await client.connect():
-            logger.error("Failed to connect to U-tec cloud")
+        # Single connection and sync
+        if not await client.connect_and_sync():
+            logger.error("Failed to connect to U-tec cloud or sync devices")
             return
         
-        # Get locks
-        locks = await client.get_locks()
+        # Get locks (use cached data, don't sync again)
+        locks = await client.get_locks(sync=False)  # Don't sync again!
+        if not locks:
+            logger.error("No locks found or accessible")
+            return
         
+        # Handle different operations
         if args.all:
-            # Get info for all locks
-            for lock in locks:
-                try:
-                    info = await client.get_lock_info(lock)
-                    print(f"Lock: {info['name']}")
-                    print(f"  MAC Address: {info['mac_address']}")
-                    print(f"  Model: {info['model']}")
-                    print(f"  Battery: {info['battery']}%")
-                    print(f"  Lock Status: {info['lock_status']}")
-                    print(f"  Bolt Status: {info['bolt_status']}")
-                    print(f"  Lock Mode: {info['lock_mode']}")
-                    print(f"  Autolock Time: {info['autolock_time']} seconds")
-                    print(f"  Mute: {info['mute']}")
-                    print(f"  Serial Number: {info['serial_number']}")
-                    print()
-                except Exception:
-                    # Error already logged in get_lock_info
-                    continue
+            await display_all_locks_info(client, locks)
+            
         elif args.name:
-            # Find lock with given name
-            lock = next((l for l in locks if l.name.lower() == args.name.lower()), None)
+            lock = find_lock_by_name(locks, args.name)
             if not lock:
-                logger.error(f"Lock with name '{args.name}' not found")
+                logger.error(f"Lock '{args.name}' not found. Available: {[l.name for l in locks]}")
                 return
             
-            # Perform action
+            # Execute specific action
             if args.info:
-                # Get info for lock
-                try:
-                    info = await client.get_lock_info(lock)
-                    print(f"Lock: {info['name']}")
-                    print(f"  MAC Address: {info['mac_address']}")
-                    print(f"  Model: {info['model']}")
-                    print(f"  Battery: {info['battery']}%")
-                    print(f"  Lock Status: {info['lock_status']}")
-                    print(f"  Bolt Status: {info['bolt_status']}")
-                    print(f"  Lock Mode: {info['lock_mode']}")
-                    print(f"  Autolock Time: {info['autolock_time']} seconds")
-                    print(f"  Mute: {info['mute']}")
-                    print(f"  Serial Number: {info['serial_number']}")
-                except Exception:
-                    # Error already logged in get_lock_info
-                    pass
+                await display_lock_info(client, lock)
             elif args.unlock:
-                # Unlock lock
                 success = await client.unlock_lock(lock)
-                if success:
-                    print(f"Unlocked lock: {lock.name}")
-                else:
-                    print(f"Failed to unlock lock: {lock.name}")
+                print(f"{'Successfully unlocked' if success else 'Failed to unlock'} {lock.name}")
             elif args.lock:
-                # Lock lock
                 success = await client.lock_lock(lock)
-                if success:
-                    print(f"Locked lock: {lock.name}")
-                else:
-                    print(f"Failed to lock lock: {lock.name}")
+                print(f"{'Successfully locked' if success else 'Failed to lock'} {lock.name}")
             elif args.autolock is not None:
-                # Set autolock time
                 success = await client.set_autolock(lock, args.autolock)
-                if success:
-                    print(f"Set autolock time for lock: {lock.name} to {args.autolock} seconds")
-                else:
-                    print(f"Failed to set autolock time for lock: {lock.name}")
+                action = f"set autolock to {args.autolock}s for"
+                print(f"{'Successfully' if success else 'Failed to'} {action} {lock.name}")
         else:
-            # No action specified
-            logger.info(f"Found {len(locks)} locks:")
+            # Default: show available locks and info for single lock
+            print(f"Available locks:")
             for lock in locks:
                 print(f"  {lock.name} ({lock.model})")
             
-            # If only one lock is available, get info for it
             if len(locks) == 1:
-                try:
-                    lock = locks[0]
-                    info = await client.get_lock_info(lock)
-                    print(f"\nLock: {info['name']}")
-                    print(f"  MAC Address: {info['mac_address']}")
-                    print(f"  Model: {info['model']}")
-                    print(f"  Battery: {info['battery']}%")
-                    print(f"  Lock Status: {info['lock_status']}")
-                    print(f"  Bolt Status: {info['bolt_status']}")
-                    print(f"  Lock Mode: {info['lock_mode']}")
-                    print(f"  Autolock Time: {info['autolock_time']} seconds")
-                    print(f"  Mute: {info['mute']}")
-                    print(f"  Serial Number: {info['serial_number']}")
-                except Exception as e:
-                    logger.error(f"Fatal error in main")
-                    logger.error(e)
+                print()  # Add spacing
+                await display_lock_info(client, locks[0])
 
 
 async def main():
     """Main function."""
-    parser = argparse.ArgumentParser(description="U-tec Client")
+    parser = argparse.ArgumentParser(description="U-tec Smart Lock Client")
     parser.add_argument("--email", "-e", help="U-tec account email")
     parser.add_argument("--password", "-p", help="U-tec account password")
-    parser.add_argument("--unlock", "-u", help="Unlock lock with given name", action="store_true")
-    parser.add_argument("--lock", "-l", help="Lock lock with given name", action="store_true")
-    parser.add_argument("--name", "-n", help="Lock name")
-    parser.add_argument("--autolock", "-a", help="Set autolock time in seconds", type=int)
-    parser.add_argument("--info", "-i", help="Get info for lock with given name", action="store_true")
-    parser.add_argument("--all", help="Get info for all locks", action="store_true")
     parser.add_argument("--config", "-c", help="Config file with email and password")
-    parser.add_argument("--debug", "-d", help="Enable debug logging", action="store_true")
+    
+    # Actions
+    parser.add_argument("--unlock", "-u", action="store_true", help="Unlock specified lock")
+    parser.add_argument("--lock", "-l", action="store_true", help="Lock specified lock")
+    parser.add_argument("--info", "-i", action="store_true", help="Get info for specified lock")
+    parser.add_argument("--all", action="store_true", help="Get info for all locks")
+    parser.add_argument("--autolock", "-a", type=int, help="Set autolock time in seconds")
+    
+    # Options
+    parser.add_argument("--name", "-n", help="Lock name for targeted actions")
+    parser.add_argument("--debug", "-d", action="store_true", help="Enable debug logging")
     
     args = parser.parse_args()
     
-    # Set debug logging if requested
+    # Configure logging
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
         utec.setup(log_level=LogLevel.DEBUG)
     
-    # Load config file if provided
+    # Get credentials
+    email, password = None, None
     if args.config:
         try:
             with open(args.config, "r") as f:
-                config = json.load(f)
-                email = config.get("email", "")
-                password = config.get("password", "")
+                config_data = json.load(f)
+                email = config_data.get("email", "")
+                password = config_data.get("password", "")
         except Exception as e:
             logger.error(f"Failed to load config file: {e}")
             return
     else:
-        # Use command line arguments
-        email = args.email
-        password = args.password
+        email, password = args.email, args.password
     
-    # Check for required arguments
     if not email or not password:
-        logger.error("Email and password are required")
+        logger.error("Email and password are required (via args or config file)")
         return
     
-    # Run all operations within the proper context manager
+    # Run operations
     await run_client_operations(email, password, args)
 
 
@@ -404,5 +351,6 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logger.info("Program interrupted by user")
     except Exception as e:
-        logger.error(f"Fatal error in main")
-        logger.error(e)
+        logger.error(f"Fatal error: {e}")
+        import traceback
+        traceback.print_exc()
