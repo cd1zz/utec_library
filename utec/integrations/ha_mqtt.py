@@ -363,6 +363,7 @@ class HomeAssistantMQTTIntegration:
             0: "UNAVAILABLE",
             1: "UNLOCKED",    
             2: "LOCKED",  
+            3: "JAMMED",
             -1: "UNKNOWN",
             255: "NOTAVAILABLE"   
         }
