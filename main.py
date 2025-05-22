@@ -143,6 +143,9 @@ async def main():
                 logger.error(f" Failed to publish state for {lock.name}")
         
         # Main loop - update states periodically
+        previous_states = {}
+        
+        # Main loop - update states periodically
         logger.info(f"Starting monitoring loop (updates every {config['update_interval']}s, Ctrl+C to stop)...")
         
         while True:
@@ -155,9 +158,36 @@ async def main():
                     # Update lock status
                     await lock.async_update_status()
                     
+                    # Current state
+                    current_state = {
+                        'battery': lock.battery,
+                        'lock_status': lock.lock_status,
+                        'lock_mode': lock.lock_mode,
+                        'autolock_time': lock.autolock_time,
+                        'mute': lock.mute
+                    }
+                    
+                    # Check for changes
+                    previous_state = previous_states.get(lock.mac_uuid, {})
+                    changes = []
+                    
+                    for key, value in current_state.items():
+                        if previous_state.get(key) != value:
+                            changes.append(f"{key}: {previous_state.get(key)} -> {value}")
+                    
+                    if changes:
+                        logger.info(f"Changes detected for {lock.name}:")
+                        for change in changes:
+                            logger.info(f"  {change}")
+                    else:
+                        logger.debug(f"No changes for {lock.name}")
+                    
+                    # Store current state for next comparison
+                    previous_states[lock.mac_uuid] = current_state
+                    
                     # Publish updated state
                     if ha_mqtt.publish_lock_state(lock):
-                        logger.debug(f"Updated state for {lock.name}")
+                        logger.debug(f"Published state for {lock.name}")
                     else:
                         logger.warning(f"Failed to publish state for {lock.name}")
                         
