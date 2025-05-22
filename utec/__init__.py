@@ -14,6 +14,16 @@ from .ble.lock import UtecBleLock
 from .factory import DeviceFactory, DeviceCategory
 from .config import UtecConfig, LogLevel, BLERetryStrategy
 from .events import EventEmitter, EventDispatcher, EventType, event_handler
+from .exceptions import (
+    UtecError, 
+    InvalidResponse, 
+    InvalidCredentials, 
+    ConnectionError, 
+    DeviceNotFoundError, 
+    DeviceError, 
+    BLEError, 
+    ConfigurationError
+)
 
 # Initialize the configuration
 from .config import config
@@ -34,7 +44,16 @@ __all__ = [
     "config",
     "setup",
     "get_logger",
-    "discover_devices"
+    "discover_devices",
+    # Exceptions
+    "UtecError",
+    "InvalidResponse",
+    "InvalidCredentials", 
+    "ConnectionError",
+    "DeviceNotFoundError",
+    "DeviceError",
+    "BLEError",
+    "ConfigurationError"
 ]
 
 
