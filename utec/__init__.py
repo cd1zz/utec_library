@@ -79,15 +79,16 @@ async def discover_devices(email, password, include_non_ble=False):
     Returns:
         List of discovered devices.
     """
-    client = UtecClient(email, password)
-    if not await client.connect():
-        return []
-    
-    if include_non_ble:
-        await client.sync_devices()
-        return client.devices
-    else:
-        return await client.get_ble_devices()
+    # Use async context manager to ensure proper session cleanup
+    async with UtecClient(email, password) as client:
+        if not await client.connect():
+            return []
+        
+        if include_non_ble:
+            await client.sync_devices()
+            return client.devices
+        else:
+            return await client.get_ble_devices()
 
 
 # Register the built-in device classes

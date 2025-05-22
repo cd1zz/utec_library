@@ -1,50 +1,34 @@
-"""Client for the U-tec API."""
+"""U-tec API client implementation."""
 
+import asyncio
 import json
 import secrets
 import string
 import time
 from typing import Any, Dict, List, Optional
-import asyncio
 
-from aiohttp import ClientResponse, ClientSession
+from aiohttp import ClientSession, ClientResponse
 
 from ..abstract import BaseUtecClient
-from ..config import config
-from ..factory import DeviceFactory, DeviceCategory
+from ..factory import DeviceFactory
 from ..ble.lock import UtecBleLock
+from ..config import config
+from ..exceptions import InvalidResponse, InvalidCredentials
 
-# Get a logger for this module
+# Get logger for this module
 logger = config.get_logger("api.client")
 
-# Headers
-CONTENT_TYPE = "application/x-www-form-urlencoded"
-ACCEPT_ENCODING = "gzip, deflate, br"
-USER_AGENT = "U-tec/2.1.14 (iPhone; iOS 15.1; Scale/3.00)"
-ACCEPT_LANG = "en-US;q=1, it-US;q=0.9"
+# API Constants
+APP_ID = "utec_app"
+CLIENT_ID = "utec_client"
+TIME_ZONE = "America/New_York"
+VERSION = "1.0.0"
+
 HEADERS = {
-    "accept": "*/*",
-    "content-type": CONTENT_TYPE,
-    "accept-encoding": ACCEPT_ENCODING,
-    "user-agent": USER_AGENT,
-    "accept-language": ACCEPT_LANG,
+    "User-Agent": "Mozilla/5.0 (compatible; U-tec-Python/1.0)",
+    "Content-Type": "application/x-www-form-urlencoded",
+    "Accept": "application/json",
 }
-
-# Token Body
-APP_ID = "13ca0de1e6054747c44665ae13e36c2c"
-CLIENT_ID = "1375ac0809878483ee236497d57f371f"
-TIME_ZONE = "-4"
-VERSION = "V3.2"
-
-
-class InvalidResponse(Exception):
-    """Unknown response from UTEC servers."""
-    pass
-
-
-class InvalidCredentials(Exception):
-    """Could not login to UTEC servers."""
-    pass
 
 
 class UtecClient(BaseUtecClient):
@@ -91,15 +75,17 @@ class UtecClient(BaseUtecClient):
 
     async def close(self) -> None:
         """Close the client session if we own it."""
-        if self.session and self._session_owned:
+        if self.session and self._session_owned and not self.session.closed:
             await self.session.close()
             self.session = None
+            logger.debug("Closed HTTP session")
 
     async def _ensure_session(self) -> ClientSession:
         """Ensure we have a session available."""
-        if not self.session:
+        if not self.session or self.session.closed:
             self.session = ClientSession()
             self._session_owned = True
+            logger.debug("Created new HTTP session")
         return self.session
 
     async def _fetch_token(self) -> None:
@@ -238,7 +224,7 @@ class UtecClient(BaseUtecClient):
             for room in response["data"]:
                 self.rooms.append(room)
                 
-            logger.debug(f"Found {len(response['data'])} rooms in this address")
+            logger.info(f"Found {len(response['data'])} rooms")
         except Exception as e:
             logger.error(f"Exception during room fetch: {str(e)}")
             raise
@@ -273,7 +259,7 @@ class UtecClient(BaseUtecClient):
             for api_device in response["data"]:
                 self.devices.append(api_device)
                 
-            logger.debug(f"Found {len(response['data'])} devices in this room")
+            logger.info(f"Found {len(response['data'])} devices")
         except Exception as e:
             logger.error(f"Exception during device fetch: {str(e)}")
             raise
