@@ -47,7 +47,7 @@ class HomeAssistantMQTTIntegration:
             client_id = f"utec_ha_{hostname}_{timestamp}"
         
         # Create MQTT client with client ID
-        self.client = mqtt.Client(client_id=client_id)
+        self.client = mqtt.Client(client_id=client_id, clean_session=False)
         self.is_connected = False
         
         # Set up MQTT client
@@ -128,9 +128,11 @@ class HomeAssistantMQTTIntegration:
     
     def disconnect(self):
         """Disconnect from MQTT broker."""
-        if self.is_connected:
+        if self.client is not None:
             self.client.loop_stop()
             self.client.disconnect()
+            logger.info(f"MQTT client {self.client._client_id.decode()} disconnected")
+
     
     def _get_device_id(self, lock) -> str:
         """Get a clean device ID for Home Assistant.
@@ -217,7 +219,7 @@ class HomeAssistantMQTTIntegration:
         """
         try:
             payload = str(state) if not isinstance(state, (dict, list)) else json.dumps(state)
-            result = self.client.publish(topic, payload, qos=self.config.qos)
+            result = self.client.publish(topic, payload, qos=self.config.qos, retain=self.config.retain)
             if result.rc == mqtt.MQTT_ERR_SUCCESS:
                 return True
             else:
