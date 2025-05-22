@@ -19,10 +19,11 @@ from ..exceptions import InvalidResponse, InvalidCredentials
 logger = config.get_logger("api.client")
 
 # API Constants
-APP_ID = "utec_app"
-CLIENT_ID = "utec_client"
-TIME_ZONE = "America/New_York"
-VERSION = "1.0.0"
+APP_ID = "13ca0de1e6054747c44665ae13e36c2c"
+CLIENT_ID = "1375ac0809878483ee236497d57f371f"
+TIME_ZONE = "-4"
+VERSION = "V3.2"
+USER_AGENT = "U-tec/2.1.14 (iPhone; iOS 15.1; Scale/3.00)"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; U-tec-Python/1.0)",
