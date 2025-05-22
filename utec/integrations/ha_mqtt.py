@@ -358,9 +358,11 @@ class HomeAssistantMQTTIntegration:
         
         # Map lock status to Home Assistant values
         lock_state_map = {
-            0: "LOCKED",  # Unlocked
-            1: "UNLOCKED",    # Locked
-            -1: "UNKNOWN"   # Not set/unknown
+            0: "UNAVAILABLE",
+            1: "UNLOCKED",    
+            2: "LOCKED",  
+            -1: "UNKNOWN",
+            255: "NOTAVAILABLE"   
         }
         
         # Lock mode mapping
