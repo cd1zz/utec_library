@@ -19,7 +19,7 @@ load_dotenv()
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import utec
-from ha_mqtt import UtecMQTTClient
+from utec.integrations.ha_mqtt import UtecMQTTClient
 
 # Configure logging
 logging.basicConfig(
