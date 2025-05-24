@@ -1,13 +1,60 @@
-"""Home Assistant MQTT integration for U-tec locks."""
+"""Complete Home Assistant MQTT integration with robust disconnection handling."""
 
 import json
 import logging
 import asyncio
-from typing import Dict, Any, Optional
-from dataclasses import dataclass
+import time
+from typing import Dict, Any, Optional, Callable, Tuple, List
+from dataclasses import dataclass, field
+from enum import Enum
 import paho.mqtt.client as mqtt
+from threading import Event, Lock
+import socket
+import re
 
 logger = logging.getLogger(__name__)
+
+
+class ConnectionState(Enum):
+    """MQTT connection states."""
+    DISCONNECTED = "disconnected"
+    CONNECTING = "connecting"
+    CONNECTED = "connected"
+    RECONNECTING = "reconnecting"
+
+
+class ConnectionHealth(Enum):
+    """Connection health states."""
+    HEALTHY = "healthy"
+    DEGRADED = "degraded" 
+    UNHEALTHY = "unhealthy"
+    FAILED = "failed"
+
+
+@dataclass
+class ConnectionMetrics:
+    """Track connection health metrics."""
+    last_successful_publish: float = 0
+    last_ping_response: float = 0
+    consecutive_failures: int = 0
+    total_reconnections: int = 0
+    connection_uptime_start: float = 0
+    
+    def reset_failures(self):
+        """Reset failure counters on successful operation."""
+        self.consecutive_failures = 0
+        self.last_successful_publish = time.time()
+    
+    def record_failure(self):
+        """Record a failure event."""
+        self.consecutive_failures += 1
+    
+    @property
+    def uptime(self) -> float:
+        """Get current connection uptime in seconds."""
+        if self.connection_uptime_start > 0:
+            return time.time() - self.connection_uptime_start
+        return 0
 
 
 @dataclass
@@ -24,10 +71,35 @@ class HAMQTTConfig:
     qos: int = 1
     retain: bool = True
     keepalive: int = 60
+    
+    # Reconnection settings
+    reconnect_on_failure: bool = True
+    max_reconnect_delay: int = 300  # 5 minutes max
+    reconnect_delay_multiplier: float = 1.5
+    initial_reconnect_delay: int = 1
+    
+    # Last Will and Testament
+    lwt_topic: Optional[str] = None
+    lwt_payload: str = "offline"
+    lwt_qos: int = 1
+    lwt_retain: bool = True
+    
+    # Connection timeouts
+    connect_timeout: int = 30
+    publish_timeout: int = 10
+    
+    # Health monitoring
+    health_check_interval: int = 30
+    ping_test_interval: int = 300  # 5 minutes
+
+    def __post_init__(self):
+        """Set default LWT topic if not provided."""
+        if self.lwt_topic is None:
+            self.lwt_topic = f"{self.device_prefix}/bridge/status"
 
 
 class HomeAssistantMQTTIntegration:
-    """Integration class for publishing U-tec lock data to Home Assistant via MQTT."""
+    """Complete MQTT integration with robust disconnection handling."""
     
     def __init__(self, config: HAMQTTConfig):
         """Initialize the MQTT integration.
@@ -36,62 +108,234 @@ class HomeAssistantMQTTIntegration:
             config: MQTT configuration.
         """
         self.config = config
+        self._state = ConnectionState.DISCONNECTED
+        self._state_lock = Lock()
+        self._connection_event = Event()
+        self._shutdown_event = Event()
+        self._health_check_task = None
+        self._reconnect_task = None
         
-        # Generate client ID if not provided
-        client_id = config.client_id
-        if not client_id:
-            import socket
-            import time
+        # Connection health tracking
+        self._metrics = ConnectionMetrics()
+        self._health_status = ConnectionHealth.FAILED
+        self._pending_publishes = {}  # Track QoS > 0 messages
+        self._message_id_counter = 0
+        
+        # Reconnection state
+        self._reconnect_delay = config.initial_reconnect_delay
+        self._last_connect_attempt = 0
+        
+        # Generate and validate client ID
+        self._client_id = self._generate_safe_client_id(config.client_id)
+        
+        # Create MQTT client
+        self.client = self._create_mqtt_client()
+        
+        logger.info(f"MQTT client initialized with ID: {self._client_id}")
+    
+    def _generate_safe_client_id(self, provided_id: Optional[str]) -> str:
+        """Generate MQTT-compliant client ID."""
+        if provided_id:
+            base_id = provided_id
+        else:
             hostname = socket.gethostname()
             timestamp = int(time.time())
-            client_id = f"utec_ha_{hostname}_{timestamp}"
+            base_id = f"utec_ha_{hostname}_{timestamp}"
         
-        # Create MQTT client with client ID
-        self.client = mqtt.Client(client_id=client_id, clean_session=False)
-        self.is_connected = False
+        # Clean the client ID for MQTT compliance
+        # - Max 23 characters for MQTT 3.1 compatibility
+        # - Only alphanumeric, dash, underscore allowed
+        # - Should not start with number (some brokers)
         
-        # Set up MQTT client
-        if config.username and config.password:
-            self.client.username_pw_set(config.username, config.password)
+        clean_id = re.sub(r'[^a-zA-Z0-9_-]', '_', base_id)
         
-        self.client.on_connect = self._on_connect
-        self.client.on_disconnect = self._on_disconnect
-        self.client.on_publish = self._on_publish
-        self.client.on_log = self._on_log
+        # Ensure it starts with a letter
+        if clean_id and clean_id[0].isdigit():
+            clean_id = f"c_{clean_id}"
         
-        logger.info(f"MQTT client initialized with ID: {client_id}")
+        # Truncate if too long (leave room for potential broker suffixes)
+        if len(clean_id) > 20:
+            clean_id = clean_id[:20]
+        
+        # Ensure we have a valid ID
+        if not clean_id:
+            clean_id = f"utec_{int(time.time()) % 10000}"
+        
+        logger.info(f"Using MQTT client ID: {clean_id} (length: {len(clean_id)})")
+        return clean_id
+    
+    def _create_mqtt_client(self) -> mqtt.Client:
+        """Create and configure MQTT client."""
+        # Use MQTT 3.1.1 for better compatibility
+        client = mqtt.Client(
+            client_id=self._client_id,
+            clean_session=False,  # Persistent session for reliability
+            protocol=mqtt.MQTTv311,
+            transport="tcp"
+        )
+        
+        # Authentication
+        if self.config.username and self.config.password:
+            client.username_pw_set(self.config.username, self.config.password)
+        
+        # Last Will and Testament - Critical for unexpected disconnections
+        if self.config.lwt_topic:
+            client.will_set(
+                self.config.lwt_topic,
+                self.config.lwt_payload,
+                qos=self.config.lwt_qos,
+                retain=self.config.lwt_retain
+            )
+            logger.debug(f"LWT configured: {self.config.lwt_topic}")
+        
+        # Connection settings optimized for reliability
+        client.socket_timeout = self.config.connect_timeout
+        client.socket_keepalive = self.config.keepalive
+        client.max_inflight_messages_set(20)  # Limit inflight for QoS > 0
+        client.max_queued_messages_set(100)   # Queue management
+        client.message_retry_set(5)           # Retry failed messages
+        
+        # Set up callbacks
+        client.on_connect = self._on_connect
+        client.on_disconnect = self._on_disconnect
+        client.on_publish = self._on_publish
+        client.on_log = self._on_log
+        client.on_socket_close = self._on_socket_close
+        client.on_socket_open = self._on_socket_open
+        
+        return client
+    
+    @property
+    def is_connected(self) -> bool:
+        """Check if client is connected."""
+        with self._state_lock:
+            return self._state == ConnectionState.CONNECTED
+    
+    @property 
+    def connection_state(self) -> ConnectionState:
+        """Get current connection state."""
+        with self._state_lock:
+            return self._state
+    
+    @property
+    def health_status(self) -> ConnectionHealth:
+        """Get current health status."""
+        return self._health_status
+    
+    def _set_state(self, new_state: ConnectionState):
+        """Thread-safe state change."""
+        with self._state_lock:
+            old_state = self._state
+            self._state = new_state
+            
+            if new_state == ConnectionState.CONNECTED:
+                self._connection_event.set()
+            else:
+                self._connection_event.clear()
+                
+            logger.debug(f"State transition: {old_state.value} -> {new_state.value}")
     
     def _on_connect(self, client, userdata, flags, rc):
-        """Callback for when MQTT client connects."""
+        """Enhanced connection callback with health reset."""
         if rc == 0:
-            self.is_connected = True
-            logger.info(f"Connected to MQTT broker as client '{client._client_id.decode()}'")
+            self._set_state(ConnectionState.CONNECTED)
+            self._reconnect_delay = self.config.initial_reconnect_delay
+            self._metrics.connection_uptime_start = time.time()
+            self._metrics.last_ping_response = time.time()
+            self._metrics.reset_failures()
+            self._health_status = ConnectionHealth.HEALTHY
+            
+            # Start health monitoring
+            if not self._health_check_task or self._health_check_task.done():
+                self._health_check_task = asyncio.create_task(self._health_monitor())
+            
+            # Publish online status if LWT is configured
+            if self.config.lwt_topic:
+                self._publish_immediate(
+                    self.config.lwt_topic, 
+                    "online", 
+                    qos=self.config.lwt_qos, 
+                    retain=self.config.lwt_retain
+                )
+            
+            logger.info(f"Connected to MQTT broker (client: {self._client_id})")
+            session_present = flags.get('session present', False)
+            logger.info(f"Session present: {session_present}")
         else:
+            self._set_state(ConnectionState.DISCONNECTED)
+            self._health_status = ConnectionHealth.FAILED
             error_messages = {
                 1: "Connection refused - incorrect protocol version",
-                2: "Connection refused - invalid client identifier",
+                2: "Connection refused - invalid client identifier", 
                 3: "Connection refused - server unavailable",
                 4: "Connection refused - bad username or password",
                 5: "Connection refused - not authorised"
             }
             error_msg = error_messages.get(rc, f"Connection refused - unknown error ({rc})")
-            logger.error(f"Failed to connect to MQTT broker: {error_msg}")
+            logger.error(f"Failed to connect: {error_msg}")
     
     def _on_disconnect(self, client, userdata, rc):
-        """Callback for when MQTT client disconnects."""
-        self.is_connected = False
-        if rc != 0:
-            logger.warning(f"Unexpected MQTT disconnection (client: {client._client_id.decode()}, rc: {rc})")
+        """Enhanced disconnect callback with reconnection logic."""
+        old_state = self._state
+        self._set_state(ConnectionState.DISCONNECTED)
+        self._health_status = ConnectionHealth.FAILED
+        
+        # Stop health monitoring
+        if self._health_check_task and not self._health_check_task.done():
+            self._health_check_task.cancel()
+        
+        if rc == 0:
+            logger.info(f"Clean disconnect (client: {self._client_id})")
         else:
-            logger.info(f"Disconnected from MQTT broker (client: {client._client_id.decode()})")
+            disconnect_reasons = {
+                1: "Incorrect protocol version",
+                2: "Invalid client identifier", 
+                3: "Server unavailable",
+                4: "Bad username or password",
+                5: "Not authorised",
+                16: "Keep alive timeout",
+                128: "Unspecified error"
+            }
+            reason = disconnect_reasons.get(rc, f"Unknown error ({rc})")
+            logger.warning(f"Unexpected disconnect: {reason} (client: {self._client_id})")
+            
+            self._metrics.record_failure()
+            
+            # Start reconnection if enabled and not shutting down
+            if self.config.reconnect_on_failure and not self._shutdown_event.is_set():
+                if not self._reconnect_task or self._reconnect_task.done():
+                    self._reconnect_task = asyncio.create_task(self._reconnect_loop())
+    
+    def _on_socket_open(self, client, userdata, sock):
+        """Socket opened - good sign for connection health."""
+        logger.debug(f"Socket opened for {self._client_id}")
+    
+    def _on_socket_close(self, client, userdata, sock):
+        """Socket closed - indicates network issues."""
+        logger.warning(f"Socket closed unexpectedly for {self._client_id}")
+        if self._health_status != ConnectionHealth.FAILED:
+            self._health_status = ConnectionHealth.UNHEALTHY
     
     def _on_publish(self, client, userdata, mid):
-        """Callback for when message is published."""
-        logger.debug(f"Message {mid} published by client {client._client_id.decode()}")
+        """Handle publish acknowledgments for QoS > 0."""
+        logger.debug(f"Message {mid} acknowledged by broker")
+        
+        # Update health metrics
+        self._metrics.last_successful_publish = time.time()
+        self._metrics.reset_failures()
+        
+        # Update health status if recovering
+        if self._health_status == ConnectionHealth.DEGRADED:
+            self._health_status = ConnectionHealth.HEALTHY
+        
+        # Handle pending publishes tracking
+        if mid in self._pending_publishes:
+            topic, future = self._pending_publishes.pop(mid)
+            if not future.done():
+                future.set_result(True)
     
     def _on_log(self, client, userdata, level, buf):
-        """Callback for MQTT client logging."""
-        # Map MQTT log levels to Python logging levels
+        """MQTT client logging with proper level mapping."""
         log_level_map = {
             mqtt.MQTT_LOG_INFO: logging.INFO,
             mqtt.MQTT_LOG_NOTICE: logging.INFO,
@@ -101,38 +345,232 @@ class HomeAssistantMQTTIntegration:
         }
         
         python_level = log_level_map.get(level, logging.INFO)
-        logger.log(python_level, f"MQTT ({client._client_id.decode()}): {buf}")
+        logger.log(python_level, f"MQTT ({self._client_id}): {buf}")
     
     async def connect(self) -> bool:
-        """Connect to MQTT broker.
+        """Connect to MQTT broker with timeout and retry logic."""
+        if self.is_connected:
+            return True
+            
+        self._set_state(ConnectionState.CONNECTING)
+        self._last_connect_attempt = time.time()
         
-        Returns:
-            True if connected successfully.
-        """
         try:
-            self.client.connect(self.config.broker_host, self.config.broker_port, self.config.keepalive)
+            # Start connection attempt
+            self.client.connect_async(
+                self.config.broker_host, 
+                self.config.broker_port, 
+                self.config.keepalive
+            )
             self.client.loop_start()
             
-            # Wait for connection
-            for _ in range(50):  # 5 second timeout
-                if self.is_connected:
-                    return True
-                await asyncio.sleep(0.1)
+            # Wait for connection with timeout
+            connected = await asyncio.wait_for(
+                self._wait_for_connection(),
+                timeout=self.config.connect_timeout
+            )
             
-            logger.error("Timeout waiting for MQTT connection")
+            return connected
+            
+        except asyncio.TimeoutError:
+            logger.error(f"Connection timeout after {self.config.connect_timeout}s")
+            self._set_state(ConnectionState.DISCONNECTED)
             return False
-            
         except Exception as e:
-            logger.error(f"Error connecting to MQTT broker: {e}")
+            logger.error(f"Connection error: {e}")
+            self._set_state(ConnectionState.DISCONNECTED)
             return False
     
+    async def _wait_for_connection(self) -> bool:
+        """Wait for connection event."""
+        while not self._shutdown_event.is_set():
+            if self._connection_event.wait(timeout=0.1):
+                return True
+            await asyncio.sleep(0.1)
+        return False
+    
+    async def _reconnect_loop(self):
+        """Automatic reconnection with exponential backoff."""
+        if self.connection_state == ConnectionState.RECONNECTING:
+            return  # Already reconnecting
+            
+        self._set_state(ConnectionState.RECONNECTING)
+        
+        while (not self.is_connected and 
+               not self._shutdown_event.is_set() and 
+               self.config.reconnect_on_failure):
+            
+            # Exponential backoff
+            time_since_last_attempt = time.time() - self._last_connect_attempt
+            if time_since_last_attempt < self._reconnect_delay:
+                sleep_time = self._reconnect_delay - time_since_last_attempt
+                logger.info(f"Waiting {sleep_time:.1f}s before reconnection attempt")
+                await asyncio.sleep(sleep_time)
+            
+            logger.info(f"Attempting to reconnect (delay: {self._reconnect_delay}s, "
+                       f"attempt #{self._metrics.total_reconnections + 1})")
+            
+            if await self.connect():
+                self._metrics.total_reconnections += 1
+                logger.info(f"Reconnected successfully (total reconnections: {self._metrics.total_reconnections})")
+                return
+            
+            # Increase delay for next attempt
+            self._reconnect_delay = min(
+                self._reconnect_delay * self.config.reconnect_delay_multiplier,
+                self.config.max_reconnect_delay
+            )
+    
+    async def _health_monitor(self):
+        """Continuous health monitoring to detect connection issues."""
+        logger.info("Starting connection health monitoring")
+        
+        while not self._shutdown_event.is_set() and self.is_connected:
+            try:
+                await asyncio.sleep(self.config.health_check_interval)
+                
+                current_time = time.time()
+                
+                # Check if we haven't published anything recently
+                time_since_publish = current_time - self._metrics.last_successful_publish
+                time_since_ping = current_time - self._metrics.last_ping_response
+                
+                # Determine health status
+                if time_since_publish > 300:  # 5 minutes without successful publish
+                    if self._health_status == ConnectionHealth.HEALTHY:
+                        self._health_status = ConnectionHealth.DEGRADED
+                        logger.warning("Connection health degraded - no recent successful publishes")
+                elif time_since_ping > 120:  # 2 minutes without ping response
+                    if self._health_status != ConnectionHealth.UNHEALTHY:
+                        self._health_status = ConnectionHealth.UNHEALTHY
+                        logger.warning("Connection unhealthy - no ping responses")
+                
+                # Perform active health check by publishing a ping
+                if (self._health_status in [ConnectionHealth.DEGRADED, ConnectionHealth.UNHEALTHY] or
+                    time_since_publish > self.config.ping_test_interval):
+                    await self._perform_ping_test()
+                
+                # Force reconnection if connection seems dead
+                if (time_since_ping > 180 and 
+                    self._metrics.consecutive_failures > 3):
+                    logger.error("Connection appears dead - forcing reconnection")
+                    self.client.disconnect()  # Trigger reconnection
+                    break
+                    
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error in health monitor: {e}")
+                await asyncio.sleep(5)
+        
+        logger.info("Health monitoring stopped")
+    
+    async def _perform_ping_test(self):
+        """Perform active ping test to verify connection."""
+        try:
+            # Publish a small test message
+            test_topic = f"{self.config.device_prefix}/bridge/ping"
+            result = self.client.publish(test_topic, 
+                                       payload=str(int(time.time())), 
+                                       qos=0)
+            
+            if result.rc == mqtt.MQTT_ERR_SUCCESS:
+                self._metrics.last_ping_response = time.time()
+                if self._health_status == ConnectionHealth.UNHEALTHY:
+                    self._health_status = ConnectionHealth.DEGRADED
+                    logger.info("Ping test successful - connection recovering")
+            else:
+                logger.warning(f"Ping test failed: {result.rc}")
+                self._metrics.record_failure()
+                
+        except Exception as e:
+            logger.error(f"Error performing ping test: {e}")
+            self._metrics.record_failure()
+    
     def disconnect(self):
-        """Disconnect from MQTT broker."""
-        if self.client is not None:
+        """Graceful disconnect with cleanup."""
+        self._shutdown_event.set()
+        
+        # Cancel background tasks
+        if self._health_check_task and not self._health_check_task.done():
+            self._health_check_task.cancel()
+        if self._reconnect_task and not self._reconnect_task.done():
+            self._reconnect_task.cancel()
+        
+        if self.client:
+            # Publish offline status if LWT configured
+            if self.config.lwt_topic and self.is_connected:
+                self._publish_immediate(
+                    self.config.lwt_topic,
+                    self.config.lwt_payload,
+                    qos=self.config.lwt_qos,
+                    retain=self.config.lwt_retain
+                )
+            
             self.client.loop_stop()
             self.client.disconnect()
-            logger.info(f"MQTT client {self.client._client_id.decode()} disconnected")
-
+            logger.info(f"MQTT client {self._client_id} disconnected")
+    
+    def _publish_immediate(self, topic: str, payload: Any, 
+                          qos: int = None, retain: bool = None) -> bool:
+        """Synchronous publish for internal use."""
+        if not self.is_connected:
+            return False
+            
+        qos = qos if qos is not None else self.config.qos
+        retain = retain if retain is not None else self.config.retain
+        
+        try:
+            payload_str = str(payload) if not isinstance(payload, (dict, list)) else json.dumps(payload)
+            result = self.client.publish(topic, payload_str, qos=qos, retain=retain)
+            return result.rc == mqtt.MQTT_ERR_SUCCESS
+        except Exception as e:
+            logger.error(f"Error in immediate publish to {topic}: {e}")
+            return False
+    
+    async def publish_with_ack(self, topic: str, payload: Any, 
+                              qos: int = None, retain: bool = None, 
+                              timeout: float = None) -> bool:
+        """Publish message and wait for acknowledgment if QoS > 0."""
+        if not self.is_connected:
+            logger.error("Cannot publish: not connected to MQTT broker")
+            return False
+        
+        qos = qos if qos is not None else self.config.qos
+        retain = retain if retain is not None else self.config.retain
+        timeout = timeout if timeout is not None else self.config.publish_timeout
+        
+        try:
+            payload_str = str(payload) if not isinstance(payload, (dict, list)) else json.dumps(payload)
+            result = self.client.publish(topic, payload_str, qos=qos, retain=retain)
+            
+            if result.rc != mqtt.MQTT_ERR_SUCCESS:
+                logger.error(f"Failed to publish to {topic}: {result.rc}")
+                self._metrics.record_failure()
+                return False
+            
+            # For QoS 0, return immediately
+            if qos == 0:
+                self._metrics.reset_failures()
+                return True
+            
+            # For QoS > 0, wait for acknowledgment
+            future = asyncio.Future()
+            self._pending_publishes[result.mid] = (topic, future)
+            
+            try:
+                await asyncio.wait_for(future, timeout=timeout)
+                return True
+            except asyncio.TimeoutError:
+                logger.warning(f"Publish acknowledgment timeout for {topic}")
+                self._pending_publishes.pop(result.mid, None)
+                self._metrics.record_failure()
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error publishing to {topic}: {e}")
+            self._metrics.record_failure()
+            return False
     
     def _get_device_id(self, lock) -> str:
         """Get a clean device ID for Home Assistant.
@@ -457,64 +895,17 @@ class HomeAssistantMQTTIntegration:
                 logger.error(f"Failed to remove {object_id}")
         
         return success
-
-
-# Example usage function
-async def main():
-    """Example of how to use the MQTT integration."""
     
-    # Configure MQTT
-    mqtt_config = HAMQTTConfig(
-        broker_host="your-mqtt-broker",  # Change to your MQTT broker
-        broker_port=1883,
-        username="your-username",       # Optional
-        password="your-password",       # Optional
-        discovery_prefix="homeassistant",
-        device_prefix="utec"
-    )
-    
-    # Create integration
-    ha_mqtt = HomeAssistantMQTTIntegration(mqtt_config)
-    
-    # Connect to MQTT
-    if not await ha_mqtt.connect():
-        logger.error("Failed to connect to MQTT broker")
-        return
-    
-    try:
-        # Your existing U-tec code here to get locks
-        # import utec
-        # locks = await utec.discover_devices("email", "password")
-        
-        # For each lock, set up discovery and publish state
-        # for lock in locks:
-        #     # Set up Home Assistant discovery
-        #     if ha_mqtt.setup_lock_discovery(lock):
-        #         logger.info(f"Set up discovery for {lock.name}")
-        #     
-        #     # Update lock status
-        #     await lock.async_update_status()
-        #     
-        #     # Publish current state
-        #     if ha_mqtt.publish_lock_state(lock):
-        #         logger.info(f"Published state for {lock.name}")
-        
-        # Keep the connection alive for ongoing updates
-        while True:
-            await asyncio.sleep(300)  # Update every 5 minutes
-            
-            # Update and publish states for all locks
-            # for lock in locks:
-            #     try:
-            #         await lock.async_update_status()
-            #         ha_mqtt.publish_lock_state(lock)
-            #     except Exception as e:
-            #         logger.error(f"Error updating {lock.name}: {e}")
-    
-    finally:
-        ha_mqtt.disconnect()
-
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    asyncio.run(main())
+    def get_connection_stats(self) -> Dict[str, Any]:
+        """Get connection statistics for monitoring."""
+        return {
+            "client_id": self._client_id,
+            "state": self._state.value,
+            "health": self._health_status.value,
+            "uptime": self._metrics.uptime,
+            "consecutive_failures": self._metrics.consecutive_failures,
+            "total_reconnections": self._metrics.total_reconnections,
+            "last_successful_publish": self._metrics.last_successful_publish,
+            "time_since_last_publish": time.time() - self._metrics.last_successful_publish if self._metrics.last_successful_publish > 0 else -1,
+            "reconnect_delay": self._reconnect_delay
+        }
