@@ -14,6 +14,7 @@ from threading import Event, Lock
 import socket
 import re
 from collections import defaultdict
+import os
 
 logger = logging.getLogger(__name__)
 
