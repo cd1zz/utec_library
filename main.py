@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
-U-tec to Home Assistant integration.
+Simple U-tec to Home Assistant integration.
+Follows KISS, YAGNI, and SOLID principles.
 """
 
+import asyncio
 import time
 import logging
 import sys
@@ -55,7 +57,7 @@ class UtecHaBridge:
         self.locks: List = []
         logger.info(f"Bridge initialized (update interval: {update_interval}s)")
     
-    def initialize(self) -> bool:
+    async def initialize(self) -> bool:
         """Initialize U-tec library and discover devices."""
         try:
             logger.info("Initializing U-tec library...")
@@ -67,7 +69,7 @@ class UtecHaBridge:
                 return False
             
             logger.info("Discovering U-tec devices...")
-            self.locks = utec.discover_devices(self.utec_email, self.utec_password)
+            self.locks = await utec.discover_devices(self.utec_email, self.utec_password)
             
             if not self.locks:
                 logger.warning("No U-tec devices found")
@@ -83,7 +85,7 @@ class UtecHaBridge:
                     continue
                 
                 # Get initial status and publish
-                self._update_lock_status(lock)
+                await self._update_lock_status(lock)
                 self._publish_lock_state(lock)
                 logger.info(f"Successfully set up {lock.name}")
             
@@ -94,10 +96,10 @@ class UtecHaBridge:
             logger.error(f"Initialization failed: {e}", exc_info=True)
             return False
     
-    def _update_lock_status(self, lock) -> bool:
+    async def _update_lock_status(self, lock) -> bool:
         """Update a single lock's status."""
         try:
-            lock.update_status()
+            await lock.async_update_status()
             logger.debug(f"Updated status for {lock.name}")
             return True
         except Exception as e:
@@ -117,13 +119,13 @@ class UtecHaBridge:
             logger.error(f"Exception publishing state for {lock.name}: {e}")
             return False
     
-    def _update_all_locks(self):
+    async def _update_all_locks(self):
         """Update all locks and publish their states."""
         logger.info("Updating all lock states...")
         
         successful_updates = 0
         for lock in self.locks:
-            if self._update_lock_status(lock):
+            if await self._update_lock_status(lock):
                 if self._publish_lock_state(lock):
                     successful_updates += 1
         
@@ -133,7 +135,7 @@ class UtecHaBridge:
         else:
             logger.warning(f"Updated {successful_updates}/{total_locks} locks")
     
-    def run(self):
+    async def run(self):
         """Main application loop."""
         logger.info("Starting monitoring loop...")
         logger.info("Press Ctrl+C to stop")
@@ -143,7 +145,7 @@ class UtecHaBridge:
                 start_time = time.time()
                 
                 # Update all locks
-                self._update_all_locks()
+                await self._update_all_locks()
                 
                 # Calculate sleep time
                 elapsed = time.time() - start_time
@@ -151,7 +153,7 @@ class UtecHaBridge:
                 
                 if sleep_time > 0:
                     logger.debug(f"Sleeping for {sleep_time:.1f} seconds...")
-                    time.sleep(sleep_time)
+                    await asyncio.sleep(sleep_time)
                 else:
                     logger.warning(f"Update cycle took {elapsed:.1f}s (longer than {self.update_interval}s interval)")
                     
@@ -210,39 +212,42 @@ def load_config():
 
 def main():
     """Main application entry point."""
-    bridge = None
-    
-    try:
-        # Load configuration
-        config = load_config()
-        logger.info("Configuration loaded")
+    async def async_main():
+        bridge = None
         
-        # Create bridge
-        bridge = UtecHaBridge(**config)
-        
-        # Set up signal handlers for clean shutdown
-        def signal_handler(signum, frame):
-            logger.info(f"Received signal {signum}")
-            if bridge:
-                bridge.stop()
-        
-        signal.signal(signal.SIGINT, signal_handler)
-        signal.signal(signal.SIGTERM, signal_handler)
-        
-        # Initialize and run
-        if bridge.initialize():
-            bridge.run()
-            return 0
-        else:
-            logger.error("Failed to initialize bridge")
-            return 1
+        try:
+            # Load configuration
+            config = load_config()
+            logger.info("Configuration loaded")
             
-    except Exception as e:
-        logger.error(f"Application error: {e}", exc_info=True)
-        return 1
-    finally:
-        if bridge:
-            bridge.shutdown()
+            # Create bridge
+            bridge = UtecHaBridge(**config)
+            
+            # Set up signal handlers for clean shutdown
+            def signal_handler(signum, frame):
+                logger.info(f"Received signal {signum}")
+                if bridge:
+                    bridge.stop()
+            
+            signal.signal(signal.SIGINT, signal_handler)
+            signal.signal(signal.SIGTERM, signal_handler)
+            
+            # Initialize and run
+            if await bridge.initialize():
+                await bridge.run()
+                return 0
+            else:
+                logger.error("Failed to initialize bridge")
+                return 1
+                
+        except Exception as e:
+            logger.error(f"Application error: {e}", exc_info=True)
+            return 1
+        finally:
+            if bridge:
+                bridge.shutdown()
+    
+    return asyncio.run(async_main())
 
 
 if __name__ == "__main__":
