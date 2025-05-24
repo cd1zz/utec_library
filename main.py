@@ -84,8 +84,8 @@ async def setup_device_discovery(ha_mqtt, lock):
     try:
         logger.info(f"Setting up {lock.name} ({lock.mac_uuid})")
         
-        # Set up Home Assistant discovery (now async)
-        if await ha_mqtt.setup_lock_discovery(lock):
+        # Set up Home Assistant discovery (backward compatible - not async)
+        if ha_mqtt.setup_lock_discovery(lock):
             logger.info(f" Set up Home Assistant discovery for {lock.name}")
             return True
         else:
@@ -111,8 +111,8 @@ async def update_and_publish_device_state(ha_mqtt, lock):
         logger.info(f"  Autolock: {lock.autolock_time}s")
         logger.info(f"  Mute: {lock.mute}")
         
-        # Publish state to Home Assistant (now async)
-        if await ha_mqtt.publish_lock_state(lock):
+        # Publish state to Home Assistant (backward compatible - not async)
+        if ha_mqtt.publish_lock_state(lock):
             logger.debug(f" Published state for {lock.name}")
             return True
         else:
@@ -198,11 +198,11 @@ async def main():
         # Set up each lock in Home Assistant
         setup_success_count = 0
         for lock in locks:
-            if await setup_device_discovery(ha_mqtt, lock):
+            if await setup_device_discovery(ha_mqtt, lock):  # Keep async here for the outer function
                 setup_success_count += 1
                 
                 # Get and publish initial status
-                if await update_and_publish_device_state(ha_mqtt, lock):
+                if await update_and_publish_device_state(ha_mqtt, lock):  # Keep async here
                     logger.info(f" Published initial state for {lock.name}")
                 else:
                     logger.error(f" Failed to publish initial state for {lock.name}")
@@ -261,8 +261,8 @@ async def main():
                     # Store current state for next comparison
                     previous_states[lock.mac_uuid] = current_state
                     
-                    # Publish updated state (now async with better error handling)
-                    if await ha_mqtt.publish_lock_state(lock):
+                    # Publish updated state (backward compatible - not async)
+                    if ha_mqtt.publish_lock_state(lock):
                         logger.debug(f"Published state for {lock.name}")
                         successful_updates += 1
                     else:
