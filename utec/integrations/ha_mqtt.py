@@ -284,6 +284,7 @@ class UtecMQTTClient:
             return False
         
         device_id = self._get_device_id(lock)
+        device_name = self._get_device_name(lock)
         
         # U-tec specific state mappings
         lock_states = {
@@ -311,18 +312,39 @@ class UtecMQTTClient:
             3: 90    # High
         }
         
+        # Get raw values from lock
+        raw_lock_status = getattr(lock, 'lock_status', -1)
+        raw_battery = getattr(lock, 'battery', -1)
+        raw_lock_mode = getattr(lock, 'lock_mode', -1)
+        raw_autolock = getattr(lock, 'autolock_time', 0)
+        raw_mute = getattr(lock, 'mute', False)
+        
+        # Convert to HA values
+        ha_lock_state = lock_states.get(raw_lock_status, "UNKNOWN")
+        ha_battery = battery_levels.get(raw_battery, 0)
+        ha_lock_mode = lock_modes.get(raw_lock_mode, "Unknown")
+        
+        # Log the sensor values being published
+        logger.info(f"Publishing states for {device_name}:")
+        logger.info(f"  Lock: {ha_lock_state} (raw: {raw_lock_status})")
+        logger.info(f"  Battery: {ha_battery}% (raw: {raw_battery})")
+        logger.info(f"  Lock Mode: {ha_lock_mode} (raw: {raw_lock_mode})")
+        logger.info(f"  Autolock: {raw_autolock}s")
+        logger.info(f"  Mute: {raw_mute}")
+        
+        # Add signal strength if available
+        if hasattr(lock, 'rssi'):
+            logger.info(f"  Signal: {lock.rssi} dBm")
+        elif hasattr(lock, 'signal_strength'):
+            logger.info(f"  Signal: {lock.signal_strength} dBm")
+        
         # Prepare state updates
         states = [
-            (f"{self.device_prefix}/{device_id}/lock/state",
-             lock_states.get(getattr(lock, 'lock_status', -1), "UNKNOWN")),
-            (f"{self.device_prefix}/{device_id}/battery/state", 
-             battery_levels.get(getattr(lock, 'battery', -1), 0)),
-            (f"{self.device_prefix}/{device_id}/lock_mode/state",
-             lock_modes.get(getattr(lock, 'lock_mode', -1), "Unknown")),
-            (f"{self.device_prefix}/{device_id}/autolock/state",
-             getattr(lock, 'autolock_time', 0)),
-            (f"{self.device_prefix}/{device_id}/mute/state", 
-             str(getattr(lock, 'mute', False)))
+            (f"{self.device_prefix}/{device_id}/lock/state", ha_lock_state),
+            (f"{self.device_prefix}/{device_id}/battery/state", ha_battery),
+            (f"{self.device_prefix}/{device_id}/lock_mode/state", ha_lock_mode),
+            (f"{self.device_prefix}/{device_id}/autolock/state", raw_autolock),
+            (f"{self.device_prefix}/{device_id}/mute/state", str(raw_mute))
         ]
         
         # Add signal strength if available
@@ -338,9 +360,9 @@ class UtecMQTTClient:
                 success = False
         
         if success:
-            logger.debug(f"Updated state for {self._get_device_name(lock)}")
+            logger.debug(f"Updated state for {device_name}")
         else:
-            logger.error(f"Failed to update some states for {self._get_device_name(lock)}")
+            logger.error(f"Failed to update some states for {device_name}")
         
         return success
     
@@ -402,39 +424,3 @@ class UtecMQTTClient:
             "sw_version": getattr(lock, 'firmware_version', 'Unknown'),
             "via_device": f"{self.device_prefix}_bridge"
         }
-
-
-# Example usage
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    
-    # Initialize client
-    mqtt_client = UtecMQTTClient(
-        broker_host="your-ha-broker.local",
-        username="mqtt_user", 
-        password="mqtt_password"
-    )
-    
-    # Connect and set up discovery
-    if mqtt_client.connect():
-        # Example lock object (replace with your actual lock data)
-        class MockLock:
-            mac_uuid = "aa:bb:cc:dd:ee:ff"
-            name = "Front Door Lock"
-            lock_status = 2  # LOCKED
-            battery = 2      # Medium
-            lock_mode = 0    # Normal
-            autolock_time = 30
-            mute = False
-            rssi = -45
-        
-        lock = MockLock()
-        
-        # Set up discovery once
-        mqtt_client.setup_lock_discovery(lock)
-        
-        # Update state (do this every 5 minutes)
-        mqtt_client.update_lock_state(lock)
-        
-        # Clean disconnect
-        mqtt_client.disconnect()
