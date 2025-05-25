@@ -137,7 +137,7 @@ class UtecBleLock(UtecBleDevice, BaseLock):
         """
         logger.info(f"Setting work mode for {self.name} to {mode.name}...")
         
-        self.add_request(UtecBleRequest(BLECommandCode.ADMIN_LOGIN))
+        #self.add_request(UtecBleRequest(BLECommandCode.ADMIN_LOGIN))
         if self.capabilities.bt264:
             self.add_request(
                 UtecBleRequest(BLECommandCode.SET_LOCK_STATUS, data=bytes([mode.value]))
@@ -158,7 +158,7 @@ class UtecBleLock(UtecBleDevice, BaseLock):
         logger.info(f"Setting autolock time for {self.name} to {seconds} seconds...")
         
         if self.capabilities.autolock:
-            self.add_request(UtecBleRequest(BLECommandCode.ADMIN_LOGIN))
+            #self.add_request(UtecBleRequest(BLECommandCode.ADMIN_LOGIN))
             self.add_request(
                 UtecBleRequest(
                     BLECommandCode.SET_AUTOLOCK,
@@ -171,7 +171,7 @@ class UtecBleLock(UtecBleDevice, BaseLock):
         """Update the lock status."""
         logger.info(f"Updating status for {self.name}...")
         
-        self.add_request(UtecBleRequest(BLECommandCode.ADMIN_LOGIN))
+        #self.add_request(UtecBleRequest(BLECommandCode.ADMIN_LOGIN))
         self.add_request(UtecBleRequest(BLECommandCode.LOCK_STATUS))
         if not self.capabilities.bt264:
             self.add_request(UtecBleRequest(BLECommandCode.GET_LOCK_STATUS))
