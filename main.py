@@ -159,6 +159,13 @@ class UtecHaBridge:
                     await asyncio.sleep(sleep_time)
                 else:
                     logger.warning(f"Update cycle took {elapsed:.1f}s (longer than {self.update_interval}s interval)")
+                    
+        except KeyboardInterrupt:
+            logger.info("Keyboard interrupt received")
+        except Exception as e:
+            logger.error(f"Unexpected error in main loop: {e}", exc_info=True)
+        finally:
+            self.shutdown()
     
     def shutdown(self):
         """Clean shutdown."""
