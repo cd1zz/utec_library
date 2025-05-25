@@ -257,6 +257,11 @@ class UtecHaBridge:
             # Use total timeout for the entire update cycle
             async with asyncio.timeout(self.total_update_timeout):
                 for i, lock in enumerate(self.locks):
+                    # Check if we should exit early
+                    if not self.running:
+                        logger.info("Update cycle interrupted by shutdown signal")
+                        break
+                        
                     try:
                         # Check if we should skip this device
                         if self._should_skip_device(lock):
@@ -278,7 +283,8 @@ class UtecHaBridge:
                             failed_updates += 1
                         
                         # Small delay between devices to prevent BLE stack overload
-                        if i < len(self.locks) - 1:  # Don't sleep after last device
+                        # But make it interruptible
+                        if i < len(self.locks) - 1 and self.running:  # Don't sleep after last device
                             await asyncio.sleep(1)
                             
                     except Exception as e:
@@ -289,6 +295,9 @@ class UtecHaBridge:
             elapsed = time.time() - start_time
             logger.error(f"Total update cycle timed out after {elapsed:.1f}s "
                         f"(limit: {self.total_update_timeout}s)")
+        except asyncio.CancelledError:
+            logger.info("Update cycle cancelled")
+            raise  # Re-raise to propagate cancellation
         
         # Log summary
         total_processed = successful_updates + failed_updates
@@ -304,7 +313,7 @@ class UtecHaBridge:
             logger.warning(f"{failed_updates} devices failed to update")
     
     async def run(self):
-        """Main application loop with robust error handling."""
+        """Main application loop with robust error handling and proper signal handling."""
         logger.info("Starting monitoring loop...")
         logger.info("Press Ctrl+C to stop")
         
@@ -330,7 +339,16 @@ class UtecHaBridge:
                         # Add exponential backoff for problem situations
                         backoff_time = min(300, 30 * (2 ** (consecutive_failures - max_consecutive_failures)))
                         logger.info(f"Backing off for {backoff_time} seconds...")
-                        await asyncio.sleep(backoff_time)
+                        
+                        # Use interruptible sleep that checks running flag
+                        for _ in range(int(backoff_time)):
+                            if not self.running:
+                                break
+                            await asyncio.sleep(1)
+                
+                # Check if we should exit before sleeping
+                if not self.running:
+                    break
                 
                 # Calculate sleep time for next cycle
                 elapsed = time.time() - cycle_start_time
@@ -338,13 +356,21 @@ class UtecHaBridge:
                 
                 if sleep_time > 0:
                     logger.debug(f"Cycle completed in {elapsed:.1f}s, sleeping for {sleep_time:.1f}s...")
-                    await asyncio.sleep(sleep_time)
+                    
+                    # Use interruptible sleep that checks running flag every second
+                    remaining_sleep = sleep_time
+                    while remaining_sleep > 0 and self.running:
+                        sleep_chunk = min(1.0, remaining_sleep)
+                        await asyncio.sleep(sleep_chunk)
+                        remaining_sleep -= sleep_chunk
                 else:
                     logger.warning(f"Update cycle took {elapsed:.1f}s "
                                  f"(longer than {self.update_interval}s interval)")
                     
+        except asyncio.CancelledError:
+            logger.info("Main loop cancelled")
         except KeyboardInterrupt:
-            logger.info("Keyboard interrupt received")
+            logger.info("Keyboard interrupt received in main loop")
         except Exception as e:
             logger.error(f"Unexpected error in main loop: {e}", exc_info=True)
         finally:
@@ -418,6 +444,7 @@ def main():
     """Main application entry point."""
     async def async_main():
         bridge = None
+        main_task = None
         
         try:
             # Load configuration
@@ -429,23 +456,37 @@ def main():
             # Create bridge
             bridge = UtecHaBridge(**config)
             
-            # Set up signal handlers for clean shutdown
+            # Set up signal handlers for clean shutdown with task cancellation
             def signal_handler(signum, frame):
-                logger.info(f"Received signal {signum}")
+                logger.info(f"Received signal {signum}, initiating shutdown...")
                 if bridge:
                     bridge.stop()
+                # Cancel the main task if it's running
+                if main_task and not main_task.done():
+                    logger.info("Cancelling main task...")
+                    main_task.cancel()
             
             signal.signal(signal.SIGINT, signal_handler)
             signal.signal(signal.SIGTERM, signal_handler)
             
-            # Initialize and run
-            if await bridge.initialize():
-                await bridge.run()
-                return 0
-            else:
+            # Initialize 
+            if not await bridge.initialize():
                 logger.error("Failed to initialize bridge")
                 return 1
+            
+            # Create and run the main task
+            main_task = asyncio.create_task(bridge.run())
+            
+            try:
+                await main_task
+                return 0
+            except asyncio.CancelledError:
+                logger.info("Main task was cancelled")
+                return 0
                 
+        except KeyboardInterrupt:
+            logger.info("Keyboard interrupt in main")
+            return 0
         except Exception as e:
             logger.error(f"Application error: {e}", exc_info=True)
             return 1
@@ -453,7 +494,11 @@ def main():
             if bridge:
                 bridge.shutdown()
     
-    return asyncio.run(async_main())
+    try:
+        return asyncio.run(async_main())
+    except KeyboardInterrupt:
+        logger.info("Final keyboard interrupt caught")
+        return 0
 
 
 if __name__ == "__main__":

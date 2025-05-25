@@ -71,8 +71,9 @@ class UtecBleDevice(BaseBleDevice):
         device_model: str = "",
         async_bledevice_callback: Optional[BLEDeviceCallback] = None,
         error_callback: Optional[ErrorCallback] = None,
-        connection_timeout: float = 30.0,
-        operation_timeout: float = 15.0,
+        connection_timeout: float = 60.0,  # Increased from 30.0
+        operation_timeout: float = 20.0,   # Increased from 15.0
+        scan_timeout: float = 20.0,        # New parameter for scanning
     ):
         """Initialize a U-tec BLE device.
         
@@ -87,6 +88,7 @@ class UtecBleDevice(BaseBleDevice):
             error_callback: Callback for handling errors.
             connection_timeout: Timeout for BLE connection establishment.
             operation_timeout: Timeout for individual BLE operations.
+            scan_timeout: Timeout for device scanning operations.
         """
         self.mac_uuid = mac_uuid
         self.wurx_uuid = wurx_uuid
@@ -112,9 +114,10 @@ class UtecBleDevice(BaseBleDevice):
         self.is_busy = False
         self.device_time_offset: Optional[datetime.timedelta] = None
         
-        # Timeout configuration
+        # Timeout configuration - INCREASED VALUES
         self.connection_timeout = connection_timeout
         self.operation_timeout = operation_timeout
+        self.scan_timeout = scan_timeout
         
         # Get BLE configuration from the central config
         self._scanner_lock = asyncio.Lock()
@@ -269,10 +272,11 @@ class UtecBleDevice(BaseBleDevice):
         client: Optional[BleakClient] = None
         
         try:
-            # First try to get device with timeout
+            # First try to get device with LONGER timeout
+            logger.debug(f"({self.mac_uuid}) Starting device discovery with {self.scan_timeout}s timeout...")
             device = await asyncio.wait_for(
                 self._get_bledevice(self.mac_uuid),
-                timeout=10.0
+                timeout=self.scan_timeout  # Use the longer scan timeout
             )
             
             if not device:
@@ -281,12 +285,12 @@ class UtecBleDevice(BaseBleDevice):
                     logger.debug(f"({self.mac_uuid}) Device not found, attempting wakeup")
                     await asyncio.wait_for(
                         self.async_wakeup_device(),
-                        timeout=10.0
+                        timeout=15.0  # Longer wakeup timeout
                     )
-                    # Try again after wakeup
+                    # Try again after wakeup with longer timeout
                     device = await asyncio.wait_for(
                         self._get_bledevice(self.mac_uuid),
-                        timeout=10.0
+                        timeout=self.scan_timeout
                     )
                     
                 if not device:
@@ -303,7 +307,7 @@ class UtecBleDevice(BaseBleDevice):
                 client_class=BleakClient,
                 device=device,
                 name=self.mac_uuid,
-                max_attempts=2,  # Reduced attempts to fail faster
+                max_attempts=3,  # Increased from 2
                 ble_device_callback=self._brc_get_lock_device,
             )
             
@@ -391,7 +395,7 @@ class UtecBleDevice(BaseBleDevice):
             try:
                 device = await asyncio.wait_for(
                     self.async_bledevice_callback(address),
-                    timeout=5.0
+                    timeout=10.0  # Longer timeout for callback
                 )
                 if device:
                     # Update cache and return
@@ -405,17 +409,17 @@ class UtecBleDevice(BaseBleDevice):
         # Otherwise use our own improved scanning method
         async with self._scanner_lock:
             # If we recently did a scan, wait a bit to let Bluetooth settle
-            if current_time - self._last_scan_time < 2:
-                await asyncio.sleep(2)
+            if current_time - self._last_scan_time < 3:  # Increased from 2
+                await asyncio.sleep(3)
             
             # Try discovery method first (more reliable)
             try:
-                self.debug(f"Scanning for device: {address}")
+                self.debug(f"Scanning for device: {address} (timeout: {self.scan_timeout}s)")
                 
-                # Use shorter timeout for discovery to fail faster
+                # Use the configured scan timeout
                 all_devices = await asyncio.wait_for(
-                    BleakScanner.discover(timeout=config.ble_scan_timeout),
-                    timeout=config.ble_scan_timeout + 5
+                    BleakScanner.discover(timeout=self.scan_timeout),
+                    timeout=self.scan_timeout + 5
                 )
                 
                 # Look through discovered devices
@@ -433,7 +437,7 @@ class UtecBleDevice(BaseBleDevice):
                 try:
                     device = await asyncio.wait_for(
                         get_device(address),
-                        timeout=5.0
+                        timeout=10.0  # Longer timeout for direct lookup
                     )
                     if device:
                         self.debug(f"Found device via direct lookup: {address}")
@@ -456,13 +460,13 @@ class UtecBleDevice(BaseBleDevice):
                 # For the specific "operation in progress" error, wait longer
                 if "Operation already in progress" in str(e):
                     self.debug("Detected scan in progress, waiting...")
-                    await asyncio.sleep(5)  # Reduced wait time
+                    await asyncio.sleep(10)  # Increased wait time
                     
                     # Try one more time after waiting
                     try:
                         device = await asyncio.wait_for(
                             get_device(address),
-                            timeout=5.0
+                            timeout=10.0
                         )
                         if device:
                             # Update cache
@@ -500,7 +504,7 @@ class UtecBleDevice(BaseBleDevice):
         try:
             device = await asyncio.wait_for(
                 self._get_bledevice(self.wurx_uuid),
-                timeout=10.0
+                timeout=15.0  # Longer timeout for wakeup device
             )
             if not device:
                 raise BleakNotFoundError(f"Wake-up receiver {self.wurx_uuid} not found")
@@ -515,7 +519,7 @@ class UtecBleDevice(BaseBleDevice):
             self.debug(f"({self.mac_uuid}) Wake-up receiver {self.wurx_uuid} connected.")
             
             # Wait a moment for the wake-up signal to take effect
-            await asyncio.sleep(2)
+            await asyncio.sleep(3)  # Slightly longer wait
             
             # Clean up connection
             await wclient.disconnect()
@@ -1030,7 +1034,7 @@ class UtecBleDeviceKey:
             await client.write_gatt_char(DeviceKeyUUID.ECC.value, pub_y)
             
             # Wait for ECC exchange with timeout
-            await asyncio.wait_for(notification_event.wait(), timeout=10.0)
+            await asyncio.wait_for(notification_event.wait(), timeout=15.0)  # Increased from 10.0
 
             await client.stop_notify(DeviceKeyUUID.ECC.value)
 
