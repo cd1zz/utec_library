@@ -136,13 +136,14 @@ class UtecHaBridge:
             logger.warning(f"Updated {successful_updates}/{total_locks} locks")
     
     async def run(self):
-        """Main application loop."""
         logger.info("Starting monitoring loop...")
+        logger.info(f"Update interval: {self.update_interval} seconds")
         logger.info("Press Ctrl+C to stop")
         
         try:
             while self.running:
                 start_time = time.time()
+                logger.info("=== Starting update cycle ===")
                 
                 # Update all locks
                 await self._update_all_locks()
@@ -151,18 +152,13 @@ class UtecHaBridge:
                 elapsed = time.time() - start_time
                 sleep_time = max(0, self.update_interval - elapsed)
                 
+                logger.info(f"Update cycle completed in {elapsed:.1f}s")
+                
                 if sleep_time > 0:
-                    logger.debug(f"Sleeping for {sleep_time:.1f} seconds...")
+                    logger.info(f"Sleeping for {sleep_time:.1f} seconds until next update...")
                     await asyncio.sleep(sleep_time)
                 else:
                     logger.warning(f"Update cycle took {elapsed:.1f}s (longer than {self.update_interval}s interval)")
-                    
-        except KeyboardInterrupt:
-            logger.info("Keyboard interrupt received")
-        except Exception as e:
-            logger.error(f"Unexpected error in main loop: {e}", exc_info=True)
-        finally:
-            self.shutdown()
     
     def shutdown(self):
         """Clean shutdown."""
