@@ -1,11 +1,13 @@
-"""U-tec API client implementation."""
+"""U-tec API client implementation with token persistence."""
 
 import asyncio
 import json
 import secrets
 import string
 import time
+import os
 from typing import Any, Dict, List, Optional
+from pathlib import Path
 
 from aiohttp import ClientSession, ClientResponse
 
@@ -32,11 +34,103 @@ HEADERS = {
 }
 
 
+class TokenManager:
+    """Manages token persistence and expiration."""
+    
+    def __init__(self, email: str, token_dir: str = ".utec_tokens"):
+        """Initialize token manager.
+        
+        Args:
+            email: User email (used for token filename).
+            token_dir: Directory to store token files.
+        """
+        self.email = email
+        self.token_dir = Path(token_dir)
+        self.token_file = self.token_dir / f"{self._safe_filename(email)}.json"
+        self.token_dir.mkdir(exist_ok=True)
+        
+    def _safe_filename(self, email: str) -> str:
+        """Convert email to safe filename."""
+        return "".join(c for c in email if c.isalnum() or c in "._-").lower()
+    
+    def save_token(self, token: str, expires_in: int = 7200) -> None:
+        """Save token with expiration time.
+        
+        Args:
+            token: Bearer token.
+            expires_in: Token lifetime in seconds (default 2 hours).
+        """
+        token_data = {
+            "token": token,
+            "created_at": time.time(),
+            "expires_in": expires_in,
+            "expires_at": time.time() + expires_in
+        }
+        
+        try:
+            with open(self.token_file, 'w') as f:
+                json.dump(token_data, f, indent=2)
+            logger.debug(f"Token saved to {self.token_file}")
+        except Exception as e:
+            logger.warning(f"Failed to save token: {e}")
+    
+    def load_token(self) -> Optional[str]:
+        """Load token if it exists and is not expired.
+        
+        Returns:
+            Valid token or None if expired/missing.
+        """
+        if not self.token_file.exists():
+            logger.debug("No saved token file found")
+            return None
+            
+        try:
+            with open(self.token_file, 'r') as f:
+                token_data = json.load(f)
+                
+            current_time = time.time()
+            expires_at = token_data.get('expires_at', 0)
+            
+            if current_time >= expires_at:
+                logger.info("Saved token has expired")
+                self._cleanup_expired_token()
+                return None
+                
+            token = token_data.get('token')
+            if token:
+                time_left = expires_at - current_time
+                logger.info(f"Using saved token (expires in {time_left/60:.1f} minutes)")
+                return token
+            else:
+                logger.warning("Invalid token data in saved file")
+                return None
+                
+        except Exception as e:
+            logger.warning(f"Failed to load token: {e}")
+            return None
+    
+    def _cleanup_expired_token(self) -> None:
+        """Remove expired token file."""
+        try:
+            self.token_file.unlink()
+            logger.debug("Removed expired token file")
+        except Exception as e:
+            logger.warning(f"Failed to remove expired token file: {e}")
+    
+    def invalidate_token(self) -> None:
+        """Manually invalidate the saved token."""
+        self._cleanup_expired_token()
+
+
 class UtecClient(BaseUtecClient):
-    """U-tec API client."""
+    """U-tec API client with token persistence."""
 
     def __init__(
-        self, email: str, password: str, session: Optional[ClientSession] = None
+        self, 
+        email: str, 
+        password: str, 
+        session: Optional[ClientSession] = None,
+        token_dir: str = ".utec_tokens"
     ) -> None:
         """Initialize U-tec client using the user provided email and password.
 
@@ -44,6 +138,7 @@ class UtecClient(BaseUtecClient):
             email: User email.
             password: User password.
             session: aiohttp.ClientSession.
+            token_dir: Directory to store authentication tokens.
         """
         self.mobile_uuid: Optional[str] = None
         self.email: str = email
@@ -55,6 +150,7 @@ class UtecClient(BaseUtecClient):
         self.addresses: List[Dict[str, Any]] = []
         self.rooms: List[Dict[str, Any]] = []
         self.devices: List[Dict[str, Any]] = []
+        self.token_manager = TokenManager(email, token_dir)
         self._generate_random_mobile_uuid(32)
 
     def _generate_random_mobile_uuid(self, length: int) -> None:
@@ -89,13 +185,33 @@ class UtecClient(BaseUtecClient):
             logger.debug("Created new HTTP session")
         return self.session
 
+    async def _ensure_valid_token(self) -> bool:
+        """Ensure we have a valid token, fetching new one if needed.
+        
+        Returns:
+            True if we have a valid token.
+        """
+        # First try to load saved token
+        saved_token = self.token_manager.load_token()
+        if saved_token:
+            self.token = saved_token
+            return True
+            
+        # If no saved token or expired, fetch new one
+        try:
+            await self._fetch_token()
+            return self.token is not None
+        except Exception as e:
+            logger.error(f"Failed to fetch new token: {e}")
+            return False
+
     async def _fetch_token(self) -> None:
         """Fetch the token that is used to log into the app.
         
         Raises:
             InvalidResponse: If the response is invalid.
         """
-        logger.info("Attempting to fetch authentication token...")
+        logger.info("Fetching new authentication token...")
         
         url = "https://uemc.u-tec.com/app/token"
         headers = HEADERS
@@ -122,13 +238,18 @@ class UtecClient(BaseUtecClient):
                 raise InvalidResponse("Missing token in response")
 
             self.token = response["data"]["token"]
-            logger.info("Successfully obtained token")
+            
+            # Save the token with default 2 hour expiration
+            # U-tec tokens typically expire after 2-4 hours
+            self.token_manager.save_token(self.token, expires_in=7200)
+            
+            logger.info("Successfully obtained and saved new token")
         except Exception as e:
             logger.error(f"Exception during token fetch: {str(e)}")
             raise
 
     async def _login(self) -> None:
-        """Log in to account using previous token obtained.
+        """Log in to account using current token.
         
         Raises:
             InvalidResponse: If the response is invalid.
@@ -138,7 +259,7 @@ class UtecClient(BaseUtecClient):
         
         if not self.token:
             logger.error("No token available for login")
-            raise InvalidResponse("No token available for login. Call _fetch_token first.")
+            raise InvalidResponse("No token available for login. Call _ensure_valid_token first.")
 
         url = "https://cloud.u-tec.com/app/user/login"
         headers = HEADERS
@@ -156,8 +277,18 @@ class UtecClient(BaseUtecClient):
                 raise InvalidResponse("Null response when logging in")
                 
             if "error" in response and response["error"]:
-                logger.error(f"Login failed: {response.get('error')}")
-                raise InvalidCredentials(f"Login failed: {response.get('error')}")
+                error_msg = response.get('error', 'Unknown error')
+                
+                # Check if it's a token-related error
+                if any(keyword in error_msg.lower() for keyword in ['token', 'invalid', 'expired', 'unauthorized']):
+                    logger.warning(f"Token appears invalid: {error_msg}")
+                    # Invalidate saved token and try once more
+                    self.token_manager.invalidate_token()
+                    self.token = None
+                    raise InvalidResponse(f"Token invalid: {error_msg}")
+                
+                logger.error(f"Login failed: {error_msg}")
+                raise InvalidCredentials(f"Login failed: {error_msg}")
                 
             logger.info(f"Successfully logged in as {self.email}")
         except Exception as e:
@@ -322,26 +453,47 @@ class UtecClient(BaseUtecClient):
             return {"error": "ResponseParseError", "message": str(e)}
 
     async def connect(self) -> bool:
-        """Connect to the service and authenticate.
+        """Connect to the service and authenticate with token retry logic.
         
         Returns:
             True if connection was successful.
         """
         logger.info("Starting connection process...")
-        try:
-            await self._fetch_token()
-            await self._login()
-            logger.info("Connection successful")
-            return True
-        except InvalidResponse as e:
-            logger.error(f"Connection failed due to API response error: {str(e)}")
-            return False
-        except InvalidCredentials as e:
-            logger.error(f"Connection failed due to invalid credentials: {str(e)}")
-            return False
-        except Exception as e:
-            logger.error(f"Connection failed with unexpected error: {str(e)}")
-            return False
+        
+        max_retries = 2
+        for attempt in range(max_retries):
+            try:
+                # Ensure we have a valid token
+                if not await self._ensure_valid_token():
+                    logger.error("Failed to obtain valid token")
+                    return False
+                
+                # Try to login with current token
+                await self._login()
+                logger.info("Connection successful")
+                return True
+                
+            except InvalidResponse as e:
+                if attempt < max_retries - 1 and "token" in str(e).lower():
+                    logger.warning(f"Token issue detected (attempt {attempt + 1}/{max_retries}): {e}")
+                    logger.info("Invalidating token and retrying...")
+                    self.token_manager.invalidate_token()
+                    self.token = None
+                    continue
+                else:
+                    logger.error(f"Connection failed due to API response error: {str(e)}")
+                    return False
+                    
+            except InvalidCredentials as e:
+                logger.error(f"Connection failed due to invalid credentials: {str(e)}")
+                return False
+                
+            except Exception as e:
+                logger.error(f"Connection failed with unexpected error: {str(e)}")
+                return False
+        
+        logger.error("Connection failed after all retry attempts")
+        return False
 
     async def sync_devices(self) -> bool:
         """Sync all devices, addresses, and rooms.
@@ -437,3 +589,30 @@ class UtecClient(BaseUtecClient):
         """
         await self.sync_devices()
         return self.devices
+
+    def get_token_info(self) -> Dict[str, Any]:
+        """Get information about the current token.
+        
+        Returns:
+            Token information including expiration.
+        """
+        if not self.token_manager.token_file.exists():
+            return {"status": "no_saved_token"}
+            
+        try:
+            with open(self.token_manager.token_file, 'r') as f:
+                token_data = json.load(f)
+                
+            current_time = time.time()
+            expires_at = token_data.get('expires_at', 0)
+            time_left = max(0, expires_at - current_time)
+            
+            return {
+                "status": "valid" if time_left > 0 else "expired",
+                "created_at": token_data.get('created_at'),
+                "expires_at": expires_at,
+                "time_left_seconds": time_left,
+                "time_left_minutes": time_left / 60
+            }
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
