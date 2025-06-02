@@ -26,7 +26,7 @@ class UtecMQTTClient:
         # MQTT settings
         self.keepalive = 60
         self.qos = 1
-        self.retain = True
+        self.retain = False
         
         # Topic configuration
         self.discovery_prefix = "homeassistant"
@@ -151,23 +151,27 @@ class UtecMQTTClient:
         if not self.connected:
             logger.error("Max reconnection attempts exceeded")
     
-    def publish(self, topic: str, payload: Any) -> bool:
-        """Publish message to MQTT broker."""
+    def publish(self, topic: str, payload: Any, qos: Optional[int] = None, retain: Optional[bool] = None) -> bool:
+        """Publish message to MQTT broker with flexible QoS and retain settings."""
         if not self.connected:
             logger.error("Cannot publish: not connected to broker")
             return False
         
         try:
+            # Use provided values or fall back to instance defaults
+            actual_qos = qos if qos is not None else self.qos
+            actual_retain = retain if retain is not None else self.retain
+            
             # Convert payload to JSON if needed
             if isinstance(payload, (dict, list)):
                 payload_str = json.dumps(payload)
             else:
                 payload_str = str(payload)
             
-            result = self.client.publish(topic, payload_str, qos=self.qos, retain=self.retain)
+            result = self.client.publish(topic, payload_str, qos=actual_qos, retain=actual_retain)
             
             if result.rc == mqtt.MQTT_ERR_SUCCESS:
-                logger.debug(f"Published to {topic}")
+                logger.debug(f"Published to {topic} (qos={actual_qos}, retain={actual_retain})")
                 return True
             else:
                 logger.error(f"Publish failed to {topic}: {result.rc}")

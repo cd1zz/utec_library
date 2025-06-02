@@ -148,6 +148,14 @@ class UtecHaBridge:
             except (ImportError, TypeError):
                 self.command_client = mqtt.Client(client_id=client_id)
             
+            # Set Last Will and Testament for offline detection
+            self.command_client.will_set(
+                "utec/bridge/availability", 
+                "offline", 
+                qos=1, 
+                retain=True
+            )
+            
             # Set authentication if provided
             if self.mqtt_username and self.mqtt_password:
                 self.command_client.username_pw_set(self.mqtt_username, self.mqtt_password)
@@ -174,6 +182,10 @@ class UtecHaBridge:
         """Handle command client connection."""
         if rc == 0:
             logger.info("Command client connected to MQTT")
+            
+            # Publish online status immediately after connecting
+            client.publish("utec/bridge/availability", "online", qos=1, retain=True)
+            logger.debug("Published online availability status")
             
             # Subscribe to all lock command topics
             for device_id in self.device_map.keys():
@@ -524,13 +536,13 @@ class UtecHaBridge:
                     "running": self.running
                 }
             
-            # Publish to MQTT with error handling
+            # Publish health data WITHOUT retain (time-sensitive data)
             try:
                 if not self.status_client:
                     logger.error("Status client is None - cannot publish health status")
                     return
                 
-                publish_result = self.status_client.publish("utec/bridge/health", health_status)
+                publish_result = self.status_client.publish("utec/bridge/health", health_status, retain=False)
                 if publish_result:
                     logger.debug("Health status published successfully")
                 else:
@@ -541,11 +553,11 @@ class UtecHaBridge:
                 logger.error(f"Status client type: {type(self.status_client)}")
                 logger.error(f"Health payload size: {len(str(health_status))} characters")
             
-            # Publish availability with error handling
+            # Publish availability WITH retain (status data)
             try:
                 availability_result = self.status_client.publish("utec/bridge/availability", "online", retain=True)
                 if availability_result:
-                    logger.debug("Availability status published successfully")
+                    logger.debug("Availability status published successfully with retain")
                 else:
                     logger.error("Failed to publish availability status")
                     
@@ -568,12 +580,10 @@ class UtecHaBridge:
                         "error": str(e),
                         "function": "_publish_bridge_health"
                     }
-                    self.status_client.publish("utec/bridge/health", error_status)
+                    self.status_client.publish("utec/bridge/health", error_status, retain=False)
                     logger.info("Published minimal error status to MQTT")
             except Exception as nested_e:
                 logger.error(f"Failed to publish error status: {nested_e}")
-
-
     def _setup_ha_discovery(self):
         """Set up Home Assistant auto-discovery for bridge monitoring."""
         try:
