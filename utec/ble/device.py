@@ -266,7 +266,7 @@ class UtecBleDevice(BaseBleDevice):
                             )
                         )
                 
-                logger.info(f"[{self.mac_uuid}] Device found: {device.name} (RSSI: {device.rssi})")
+                logger.info(f"[{self.mac_uuid}] Device found: {device.name}")
             
             # Connection establishment phase
             async with OperationTimeout("connection_establishment", 20.0, self.mac_uuid):
@@ -370,8 +370,8 @@ class UtecBleDevice(BaseBleDevice):
             total_elapsed = time.time() - self._operation_start_time if self._operation_start_time else 0
             logger.debug(f"[{self.mac_uuid}] Cleanup completed, total operation time: {total_elapsed:.2f}s")
 
-    async def _get_bledevice(self, address: str) -> Optional[BLEDevice]:
-            """Get BLE device with enhanced logging."""
+    async def _get_bledevice(self, address: str) -> Optional[tuple[BLEDevice, Optional[int]]]:
+            """Get BLE device with enhanced logging and RSSI from advertisement data."""
             if not address:
                 logger.warning(f"[{self.mac_uuid}] Empty address provided to _get_bledevice")
                 return None
@@ -383,10 +383,10 @@ class UtecBleDevice(BaseBleDevice):
             # Check cache first
             current_time = time.time()
             if address in self._scan_cache:
-                cache_time, device = self._scan_cache[address]
+                cache_time, device, cached_rssi = self._scan_cache[address]
                 if current_time - cache_time < self._scan_cache_ttl:
                     logger.debug(f"[{self.mac_uuid}] Using cached device (age: {current_time - cache_time:.1f}s)")
-                    return device
+                    return device, cached_rssi
                 else:
                     logger.debug(f"[{self.mac_uuid}] Cache expired (age: {current_time - cache_time:.1f}s)")
             
@@ -400,8 +400,9 @@ class UtecBleDevice(BaseBleDevice):
                     )
                     if device:
                         logger.debug(f"[{self.mac_uuid}] Device found via callback")
-                        self._scan_cache[address] = (current_time, device)
-                        return device
+                        # Cache without RSSI since callback doesn't provide advertisement data
+                        self._scan_cache[address] = (current_time, device, None)
+                        return device, None
                     else:
                         logger.debug(f"[{self.mac_uuid}] Device callback returned None")
                 except asyncio.TimeoutError:
@@ -440,11 +441,11 @@ class UtecBleDevice(BaseBleDevice):
                             rssi = adv_data.rssi if adv_data.rssi is not None else "unknown"
                             logger.info(f"[{self.mac_uuid}] Device found in discovery: {device.name} (RSSI: {rssi})")
                             
-                            # Update cache
-                            self._scan_cache[address] = (current_time, device)
+                            # Update cache with RSSI
+                            self._scan_cache[address] = (current_time, device, adv_data.rssi)
                             self._last_scan_time = current_time
                             
-                            return device
+                            return device, adv_data.rssi
                     
                     logger.debug(f"[{self.mac_uuid}] Device not found in discovery results")
                     
@@ -455,11 +456,11 @@ class UtecBleDevice(BaseBleDevice):
                         if device:
                             logger.info(f"[{self.mac_uuid}] Device found via direct lookup")
                             
-                            # Update cache
-                            self._scan_cache[address] = (current_time, device)
+                            # Update cache without RSSI since direct lookup doesn't provide advertisement data
+                            self._scan_cache[address] = (current_time, device, None)
                             self._last_scan_time = current_time
                             
-                            return device
+                            return device, None
                     except asyncio.TimeoutError:
                         logger.warning(f"[{self.mac_uuid}] Direct device lookup timed out")
                     except Exception as e:
@@ -480,16 +481,15 @@ class UtecBleDevice(BaseBleDevice):
                             device = await asyncio.wait_for(get_device(address), timeout=3.0)
                             if device:
                                 logger.info(f"[{self.mac_uuid}] Device found after retry")
-                                self._scan_cache[address] = (current_time, device)
+                                self._scan_cache[address] = (current_time, device, None)
                                 self._last_scan_time = current_time
-                                return device
+                                return device, None
                         except Exception:
                             logger.debug(f"[{self.mac_uuid}] Retry after wait also failed")
                 
                 self._last_scan_time = current_time
                 logger.warning(f"[{self.mac_uuid}] Device not found after all attempts")
                 return None
-
     async def _brc_get_lock_device(self) -> Optional[BLEDevice]:
         """Callback for bleak_retry_connector to get the lock device."""
         logger.debug(f"[{self.mac_uuid}] BRC callback requested lock device")
