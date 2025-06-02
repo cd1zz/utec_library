@@ -7,12 +7,14 @@ from ..utils.constants import BATTERY_LEVEL, LOCK_MODE, BOLT_STATUS
 
 # Home Assistant lock state mappings
 # Maps raw lock status values to HA lock entity states
+# IMPORTANT: This must match the BOLT_STATUS mapping in constants.py:
+# BOLT_STATUS = {0: "Unavailable", 1:"Unlocked", 2:"Locked", 3:"Jammed", 255:"Unavailable"}
 HA_LOCK_STATES = {
-    0: "UNLOCKED",      # BOLT_STATUS[0] = "Unlocked"
-    1: "LOCKED",        # BOLT_STATUS[1] = "Locked"  
+    0: "UNAVAILABLE",   # BOLT_STATUS[0] = "Unavailable"
+    1: "UNLOCKED",      # BOLT_STATUS[1] = "Unlocked"  ← FIXED: was "LOCKED"
+    2: "LOCKED",        # BOLT_STATUS[2] = "Locked"
+    3: "JAMMED",        # BOLT_STATUS[3] = "Jammed"
     255: "UNAVAILABLE", # BOLT_STATUS[255] = "Unavailable"
-    2: "LOCKED",        # Additional U-tec state
-    3: "JAMMED",        # Additional U-tec state (lock mechanism stuck)
     -1: "UNKNOWN"       # Fallback for unknown states
 }
 
