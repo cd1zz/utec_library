@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
 U-tec Smart Lock Home Assistant Bridge
-Monitors lock status and handles lock/unlock commands via MQTT.
-Follows KISS, YAGNI, and SOLID principles.
+Monitors lock status and handles lock/unlock commands via MQTT for home assistant integration.
 """
 
 import asyncio

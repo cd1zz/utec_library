@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-Simple U-tec to Home Assistant integration.
-Follows KISS, YAGNI, and SOLID principles.
+Simple U-tec to Home Assistant integration to monitor lock status. 
 """
 
 import asyncio
