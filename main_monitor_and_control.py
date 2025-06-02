@@ -11,6 +11,7 @@ import sys
 import os
 import signal
 import argparse
+import psutil
 from typing import List, Optional, Dict, Any
 from dotenv import load_dotenv
 
@@ -357,11 +358,224 @@ class UtecHaBridge:
             logger.info(f"Successfully updated all {total_locks} locks")
         else:
             logger.warning(f"Updated {successful_updates}/{total_locks} locks")
-    
+
+    async def _publish_bridge_health(self):
+        """Publish comprehensive bridge health status with detailed error logging."""
+        try:
+            logger.debug("Starting bridge health status publication")
+            
+            # Import psutil with error handling
+            try:
+                import psutil
+                logger.debug("psutil imported successfully")
+            except ImportError as e:
+                logger.error(f"Failed to import psutil: {e}")
+                logger.error("Install psutil with: pip install psutil")
+                return
+            
+            # Get system metrics with individual error handling
+            cpu_percent = None
+            memory_percent = None
+            disk_percent = None
+            load_avg = None
+            
+            try:
+                cpu_percent = psutil.cpu_percent(interval=1)
+                logger.debug(f"CPU usage retrieved: {cpu_percent}%")
+            except Exception as e:
+                logger.error(f"Failed to get CPU usage: {e}")
+                cpu_percent = -1  # Use -1 to indicate error
+            
+            try:
+                memory = psutil.virtual_memory()
+                memory_percent = memory.percent
+                logger.debug(f"Memory usage retrieved: {memory_percent}% ({memory.used}/{memory.total} bytes)")
+            except Exception as e:
+                logger.error(f"Failed to get memory usage: {e}")
+                memory_percent = -1
+            
+            try:
+                disk = psutil.disk_usage('/')
+                disk_percent = (disk.used / disk.total) * 100
+                logger.debug(f"Disk usage retrieved: {disk_percent:.1f}% ({disk.used}/{disk.total} bytes)")
+            except Exception as e:
+                logger.error(f"Failed to get disk usage: {e}")
+                disk_percent = -1
+            
+            try:
+                if hasattr(os, 'getloadavg'):
+                    load_avg = os.getloadavg()[0]
+                    logger.debug(f"Load average retrieved: {load_avg}")
+                else:
+                    logger.debug("Load average not available on this platform")
+                    load_avg = None
+            except Exception as e:
+                logger.error(f"Failed to get load average: {e}")
+                load_avg = None
+            
+            # Get bridge uptime with error handling
+            try:
+                bridge_uptime = int(time.time() - getattr(self, 'start_time', time.time()))
+                logger.debug(f"Bridge uptime calculated: {bridge_uptime} seconds")
+            except Exception as e:
+                logger.error(f"Failed to calculate bridge uptime: {e}")
+                bridge_uptime = 0
+            
+            # Count online locks with error handling
+            locks_online = 0
+            total_locks = 0
+            lock_details = []
+            
+            try:
+                total_locks = len(self.locks)
+                logger.debug(f"Total locks found: {total_locks}")
+                
+                for i, lock in enumerate(self.locks):
+                    try:
+                        is_busy = getattr(lock, 'is_busy', False)
+                        if not is_busy:
+                            locks_online += 1
+                        
+                        # Get lock details safely
+                        lock_detail = {
+                            "name": getattr(lock, 'name', f'Lock_{i}'),
+                            "mac": getattr(lock, 'mac_uuid', 'Unknown'),
+                            "model": getattr(lock, 'model', 'Unknown'),
+                            "is_busy": is_busy,
+                            "last_status": getattr(lock, 'last_update_time', 0)
+                        }
+                        lock_details.append(lock_detail)
+                        logger.debug(f"Lock {i+1}: {lock_detail['name']} - {'Busy' if is_busy else 'Available'}")
+                        
+                    except Exception as e:
+                        logger.error(f"Failed to process lock {i}: {e}")
+                        # Add error entry for this lock
+                        lock_details.append({
+                            "name": f"Lock_{i}_ERROR",
+                            "mac": "Unknown",
+                            "model": "Unknown", 
+                            "is_busy": True,
+                            "last_status": 0,
+                            "error": str(e)
+                        })
+                
+                logger.debug(f"Locks online: {locks_online}/{total_locks}")
+                
+            except Exception as e:
+                logger.error(f"Failed to process locks list: {e}")
+                locks_online = 0
+                total_locks = 0
+                lock_details = [{"error": "Failed to enumerate locks"}]
+            
+            # Check MQTT connection status
+            mqtt_connected = False
+            try:
+                if self.command_client:
+                    mqtt_connected = self.command_client.is_connected()
+                    logger.debug(f"MQTT command client connected: {mqtt_connected}")
+                else:
+                    logger.warning("MQTT command client is None")
+            except Exception as e:
+                logger.error(f"Failed to check MQTT connection status: {e}")
+                mqtt_connected = False
+            
+            # Get last successful update time
+            try:
+                last_update = getattr(self, 'last_successful_update', 0)
+                if last_update > 0:
+                    time_since_update = time.time() - last_update
+                    logger.debug(f"Last successful update: {time_since_update:.1f} seconds ago")
+                else:
+                    logger.debug("No successful updates recorded yet")
+            except Exception as e:
+                logger.error(f"Failed to get last update time: {e}")
+                last_update = 0
+            
+            # Build health status payload
+            try:
+                health_status = {
+                    "status": "online" if self.running else "offline",
+                    "timestamp": time.time(),
+                    "uptime_seconds": bridge_uptime,
+                    "locks_online": locks_online,
+                    "total_locks": total_locks,
+                    "mqtt_connected": mqtt_connected,
+                    "last_update": last_update,
+                    "system": {
+                        "cpu_percent": cpu_percent,
+                        "memory_percent": memory_percent,
+                        "disk_percent": disk_percent,
+                        "load_average": load_avg
+                    },
+                    "locks": lock_details
+                }
+                
+                logger.debug(f"Health status payload created: {len(str(health_status))} bytes")
+                
+            except Exception as e:
+                logger.error(f"Failed to create health status payload: {e}")
+                # Create minimal fallback payload
+                health_status = {
+                    "status": "error",
+                    "timestamp": time.time(),
+                    "error": "Failed to create full health status",
+                    "running": self.running
+                }
+            
+            # Publish to MQTT with error handling
+            try:
+                if not self.status_client:
+                    logger.error("Status client is None - cannot publish health status")
+                    return
+                
+                publish_result = self.status_client.publish("utec/bridge/health", health_status)
+                if publish_result:
+                    logger.debug("Health status published successfully")
+                else:
+                    logger.error("Failed to publish health status - publish method returned False")
+                    
+            except Exception as e:
+                logger.error(f"Exception during health status publication: {e}")
+                logger.error(f"Status client type: {type(self.status_client)}")
+                logger.error(f"Health payload size: {len(str(health_status))} characters")
+            
+            # Publish availability with error handling
+            try:
+                availability_result = self.status_client.publish("utec/bridge/availability", "online", retain=True)
+                if availability_result:
+                    logger.debug("Availability status published successfully")
+                else:
+                    logger.error("Failed to publish availability status")
+                    
+            except Exception as e:
+                logger.error(f"Exception during availability publication: {e}")
+            
+            logger.debug("Bridge health status publication completed")
+            
+        except Exception as e:
+            logger.error(f"Critical error in _publish_bridge_health: {e}")
+            logger.error(f"Exception type: {type(e).__name__}")
+            logger.error(f"Exception args: {e.args}")
+            
+            # Try to publish a minimal error status
+            try:
+                if hasattr(self, 'status_client') and self.status_client:
+                    error_status = {
+                        "status": "error",
+                        "timestamp": time.time(),
+                        "error": str(e),
+                        "function": "_publish_bridge_health"
+                    }
+                    self.status_client.publish("utec/bridge/health", error_status)
+                    logger.info("Published minimal error status to MQTT")
+            except Exception as nested_e:
+                logger.error(f"Failed to publish error status: {nested_e}")
+
     async def run(self):
         """Run the main bridge loop with monitoring and command handling."""
         # Store the event loop reference for MQTT callbacks
         self.loop = asyncio.get_running_loop()
+        self.start_time = time.time()  # Initialize start time for uptime calculation
         
         logger.info("Starting bridge main loop...")
         logger.info(f"Status update interval: {self.update_interval} seconds")
@@ -370,6 +584,7 @@ class UtecHaBridge:
         
         try:
             last_update_time = 0
+            last_health_time = 0
             
             while self.running:
                 current_time = time.time()
@@ -379,11 +594,27 @@ class UtecHaBridge:
                     logger.info("=== Starting periodic status update ===")
                     start_time = time.time()
                     
-                    await self._update_all_locks()
+                    try:
+                        await self._update_all_locks()
+                        self.last_successful_update = time.time()  # Track successful updates
+                        elapsed = time.time() - start_time
+                        logger.info(f"Status update completed successfully in {elapsed:.1f}s")
+                    except Exception as e:
+                        logger.error(f"Status update failed: {e}")
+                        elapsed = time.time() - start_time
+                        logger.error(f"Failed status update took {elapsed:.1f}s")
                     
-                    elapsed = time.time() - start_time
-                    logger.info(f"Status update completed in {elapsed:.1f}s")
                     last_update_time = current_time
+                
+                # Health status every 30 seconds
+                if current_time - last_health_time >= 30:
+                    try:
+                        await self._publish_bridge_health()
+                        logger.debug("Health status update completed")
+                    except Exception as e:
+                        logger.error(f"Health status update failed: {e}")
+                    
+                    last_health_time = current_time
                 
                 # Short sleep to avoid busy waiting
                 await asyncio.sleep(5)
@@ -393,6 +624,7 @@ class UtecHaBridge:
         except Exception as e:
             logger.error(f"Unexpected error in main loop: {e}", exc_info=True)
         finally:
+            logger.info("Exiting main loop")
             self.shutdown()
     
     def shutdown(self):
