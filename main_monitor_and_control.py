@@ -94,6 +94,8 @@ class UtecHaBridge:
                 logger.error("Failed to connect to MQTT broker")
                 return False
             
+            self._setup_ha_discovery()
+
             logger.info("Discovering U-tec devices...")
             self.locks = await utec.discover_devices(self.utec_email, self.utec_password)
             
@@ -570,6 +572,76 @@ class UtecHaBridge:
                     logger.info("Published minimal error status to MQTT")
             except Exception as nested_e:
                 logger.error(f"Failed to publish error status: {nested_e}")
+
+
+    def _setup_ha_discovery(self):
+        """Set up Home Assistant auto-discovery for bridge monitoring."""
+        try:
+            device_info = {
+                "identifiers": ["utec_bridge"],
+                "name": "Utec Smart Lock Bridge",
+                "model": "Raspberry Pi Bridge",
+                "manufacturer": "Custom",
+                "sw_version": "1.0"
+            }
+            
+            # Define sensors for auto-discovery
+            sensors = [
+                {
+                    "name": "Utec Bridge Status",
+                    "object_id": "utec_bridge_status",
+                    "state_topic": "utec/bridge/health",
+                    "value_template": "{{ value_json.status }}",
+                    "json_attributes_topic": "utec/bridge/health",
+                    "icon": "mdi:bridge"
+                },
+                {
+                    "name": "Utec Bridge CPU",
+                    "object_id": "utec_bridge_cpu",
+                    "state_topic": "utec/bridge/health", 
+                    "value_template": "{{ value_json.system.cpu_percent | round(1) }}",
+                    "unit_of_measurement": "%",
+                    "icon": "mdi:cpu-64-bit"
+                },
+                {
+                    "name": "Utec Bridge Memory",
+                    "object_id": "utec_bridge_memory",
+                    "state_topic": "utec/bridge/health",
+                    "value_template": "{{ value_json.system.memory_percent | round(1) }}",
+                    "unit_of_measurement": "%", 
+                    "icon": "mdi:memory"
+                }
+            ]
+            
+            # Publish discovery messages
+            for sensor in sensors:
+                sensor["device"] = device_info
+                sensor["unique_id"] = sensor["object_id"]
+                
+                discovery_topic = f"homeassistant/sensor/utec_bridge/{sensor['object_id']}/config"
+                self.status_client.publish(discovery_topic, sensor, retain=True)
+                logger.info(f"Published discovery for {sensor['name']}")
+                
+            # Binary sensor for connectivity
+            binary_sensor = {
+                "name": "Utec Bridge Online",
+                "object_id": "utec_bridge_online",
+                "state_topic": "utec/bridge/availability",
+                "payload_on": "online",
+                "payload_off": "offline", 
+                "device_class": "connectivity",
+                "device": device_info,
+                "unique_id": "utec_bridge_online"
+            }
+            
+            discovery_topic = "homeassistant/binary_sensor/utec_bridge/utec_bridge_online/config"
+            self.status_client.publish(discovery_topic, binary_sensor, retain=True)
+            
+            logger.info("Home Assistant auto-discovery setup complete")
+            
+        except Exception as e:
+            logger.error(f"Failed to setup HA discovery: {e}")
+
 
     async def run(self):
         """Run the main bridge loop with monitoring and command handling."""
