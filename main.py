@@ -53,7 +53,8 @@ class UtecHaBridge:
     
     def __init__(self, utec_email: str, utec_password: str, mqtt_host: str, 
                  mqtt_port: int = 1883, mqtt_username: Optional[str] = None, 
-                 mqtt_password: Optional[str] = None, update_interval: int = 300):
+                 mqtt_password: Optional[str] = None, update_interval: int = 300,
+                 dry_run: bool = False):
         """Initialize the bridge with required parameters."""
         self.utec_email = utec_email
         self.utec_password = utec_password
@@ -63,6 +64,10 @@ class UtecHaBridge:
         self.device_map: Dict[str, Any] = {}
         self.start_time = time.time()
         self.last_successful_update = 0
+        self.dry_run = dry_run
+        
+        if self.dry_run:
+            logger.warning("DRY RUN MODE - No actual lock commands will be executed!")
         
         # Initialize single MQTT client with command handling
         self.mqtt_client = UtecMQTTClient(
@@ -73,7 +78,7 @@ class UtecHaBridge:
             command_handler=self._process_command  # Direct async handler
         )
         
-        logger.info(f"Bridge initialized (update interval: {update_interval}s)")
+        logger.info(f"Bridge initialized (update interval: {update_interval}s, dry_run: {dry_run})")
     
     async def initialize(self) -> bool:
         """Initialize U-tec library and discover devices."""
@@ -173,19 +178,26 @@ class UtecHaBridge:
                 logger.warning(f"Lock {lock.name} is busy, ignoring command")
                 return
             
-            logger.info(f"Executing {command} on {lock.name}")
+            logger.info(f"{'[DRY RUN] ' if self.dry_run else ''}Executing {command} on {lock.name}")
             
-            if command.upper() == "LOCK":
-                await lock.async_lock(update=True)
-                logger.info(f"Successfully locked {lock.name}")
-                
-            elif command.upper() == "UNLOCK":
-                await lock.async_unlock(update=True)
-                logger.info(f"Successfully unlocked {lock.name}")
-                
+            if self.dry_run:
+                # In dry run mode, just simulate the command
+                logger.info(f"[DRY RUN] Would execute {command} on {lock.name}")
+                await asyncio.sleep(1)  # Simulate command delay
+                logger.info(f"[DRY RUN] Simulated {command} completed on {lock.name}")
             else:
-                logger.warning(f"Unknown command: {command}")
-                return
+                # Execute actual command
+                if command.upper() == "LOCK":
+                    await lock.async_lock(update=True)
+                    logger.info(f"Successfully locked {lock.name}")
+                    
+                elif command.upper() == "UNLOCK":
+                    await lock.async_unlock(update=True)
+                    logger.info(f"Successfully unlocked {lock.name}")
+                    
+                else:
+                    logger.warning(f"Unknown command: {command}")
+                    return
             
             # Update and publish status immediately after command
             await self._update_lock_status(lock)
@@ -195,12 +207,13 @@ class UtecHaBridge:
         except Exception as e:
             logger.error(f"Failed to execute {command} on {device_id}: {e}")
             
-            # Try to update status even after error
-            try:
-                await self._update_lock_status(lock)
-                self.mqtt_client.update_lock_state(lock)
-            except:
-                pass
+            # Try to update status even after error (unless dry run)
+            if not self.dry_run:
+                try:
+                    await self._update_lock_status(lock)
+                    self.mqtt_client.update_lock_state(lock)
+                except:
+                    pass
     
     def _setup_bridge_discovery(self):
         """Set up Home Assistant auto-discovery for bridge monitoring."""
@@ -417,10 +430,10 @@ async def test_discovery(utec_email: str, utec_password: str):
         locks = await utec.discover_devices(utec_email, utec_password)
         
         if not locks:
-            print("❌ No devices found")
+            print("No devices found")
             return False
         
-        print(f"✅ Found {len(locks)} device(s):")
+        print(f"Found {len(locks)} device(s):")
         print("-" * 40)
         
         for i, lock in enumerate(locks, 1):
@@ -441,7 +454,7 @@ async def test_discovery(utec_email: str, utec_password: str):
         return True
         
     except Exception as e:
-        print(f"❌ Discovery failed: {e}")
+        print(f"Discovery failed: {e}")
         return False
 
 
@@ -463,20 +476,37 @@ def test_mqtt_connection(mqtt_host: str, mqtt_port: int, mqtt_username: Optional
         )
         
         if test_client.connect():
-            print("✅ Connected to MQTT broker")
+            print("Connected to MQTT broker")
             test_client.disconnect()
             return True
         else:
-            print("❌ Connection failed")
+            print("Connection failed")
             return False
         
     except Exception as e:
-        print(f"❌ MQTT test failed: {e}")
+        print(f"MQTT test failed: {e}")
         return False
 
 
-def load_config():
-    """Load configuration from environment variables."""
+def load_config(config_file: Optional[str] = None, cli_overrides: Optional[Dict[str, Any]] = None):
+    """Load configuration from environment variables with optional CLI overrides."""
+    # Load environment variables from file
+    if config_file:
+        if os.path.exists(config_file):
+            load_dotenv(config_file)
+            logger.info(f"Loaded configuration from {config_file}")
+        else:
+            raise FileNotFoundError(f"Configuration file not found: {config_file}")
+    else:
+        load_dotenv()  # Load default .env file
+    
+    # Apply CLI overrides to environment (CLI takes precedence)
+    if cli_overrides:
+        for key, value in cli_overrides.items():
+            if value is not None:
+                os.environ[key.upper()] = str(value)
+                logger.debug(f"CLI override: {key.upper()}={value}")
+    
     # Required variables
     utec_email = os.getenv('UTEC_EMAIL')
     utec_password = os.getenv('UTEC_PASSWORD') 
@@ -488,7 +518,7 @@ def load_config():
         if not utec_password: missing.append('UTEC_PASSWORD')
         if not mqtt_host: missing.append('MQTT_HOST')
         
-        print("❌ Missing required environment variables:")
+        print("Missing required environment variables:")
         for var in missing:
             print(f"   - {var}")
         print("\nPlease create a .env file with:")
@@ -499,6 +529,9 @@ def load_config():
         print("   MQTT_PASSWORD=your_mqtt_pass  # optional")
         print("   UPDATE_INTERVAL=300          # optional (seconds)")
         
+        if config_file:
+            print(f"\nOr specify these in your config file: {config_file}")
+        
         raise ValueError(f"Missing required environment variables: {missing}")
     
     # Optional variables with defaults
@@ -507,7 +540,7 @@ def load_config():
     mqtt_password = os.getenv('MQTT_PASSWORD')
     update_interval = int(os.getenv('UPDATE_INTERVAL', '300'))
     
-    return {
+    config = {
         'utec_email': utec_email,
         'utec_password': utec_password,
         'mqtt_host': mqtt_host,
@@ -516,27 +549,81 @@ def load_config():
         'mqtt_password': mqtt_password,
         'update_interval': update_interval
     }
+    
+    # Log final configuration (without sensitive data)
+    safe_config = {k: v for k, v in config.items() if 'password' not in k.lower()}
+    safe_config['utec_email'] = '***@***.***' if config['utec_email'] else None
+    logger.info(f"Final configuration: {safe_config}")
+    
+    return config
 
 
 def main():
     """Main application entry point."""
-    parser = argparse.ArgumentParser(description='U-tec Home Assistant Bridge')
-    parser.add_argument('--test-discovery', action='store_true', help='Test device discovery')
-    parser.add_argument('--test-mqtt', action='store_true', help='Test MQTT connection')
-    parser.add_argument('--verbose', '-v', action='store_true', help='Verbose logging')
+    parser = argparse.ArgumentParser(
+        description='U-tec Home Assistant Bridge',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s                                    # Use default .env configuration
+  %(prog)s --verbose                          # Enable debug logging
+  %(prog)s --config-file /etc/utec/prod.env   # Use custom config file
+  %(prog)s --mqtt-host 192.168.1.100         # Override MQTT host
+  %(prog)s --update-interval 60 --dry-run    # Test mode with 60s updates
+  %(prog)s --test-discovery                   # Test device discovery only
+        """
+    )
+    
+    # Testing options
+    parser.add_argument('--test-discovery', action='store_true', 
+                       help='Test device discovery and exit')
+    parser.add_argument('--test-mqtt', action='store_true', 
+                       help='Test MQTT connection and exit')
+    
+    # Logging options
+    parser.add_argument('--verbose', '-v', action='store_true', 
+                       help='Enable verbose (DEBUG) logging')
+    parser.add_argument('--debug', action='store_true',
+                       help='Alias for --verbose')
+    
+    # Configuration options
+    parser.add_argument('--config-file', '-c', type=str,
+                       help='Path to configuration file (default: .env)')
+    parser.add_argument('--dry-run', action='store_true',
+                       help='Test mode - no actual lock commands will be executed')
+    
+    # Network configuration
+    parser.add_argument('--mqtt-host', type=str,
+                       help='MQTT broker hostname/IP (overrides MQTT_HOST env var)')
+    parser.add_argument('--mqtt-port', type=int,
+                       help='MQTT broker port (overrides MQTT_PORT env var, default: 1883)')
+    
+    # Performance tuning  
+    parser.add_argument('--update-interval', type=int,
+                       help='Lock status update interval in seconds (overrides UPDATE_INTERVAL env var, default: 300)')
     
     args = parser.parse_args()
     
     # Setup logging level
-    if args.verbose:
+    if args.verbose or args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
+        logger.debug("Debug logging enabled")
     
     async def async_main():
         bridge = None
         
         try:
-            # Load configuration
-            config = load_config()
+            # Prepare CLI overrides for environment variables
+            cli_overrides = {}
+            if args.mqtt_host:
+                cli_overrides['mqtt_host'] = args.mqtt_host
+            if args.mqtt_port:
+                cli_overrides['mqtt_port'] = args.mqtt_port
+            if args.update_interval:
+                cli_overrides['update_interval'] = args.update_interval
+            
+            # Load configuration with CLI overrides
+            config = load_config(config_file=args.config_file, cli_overrides=cli_overrides)
             logger.info("Configuration loaded successfully")
             
             # Handle test modes
@@ -550,7 +637,7 @@ def main():
                 ) else 1
             
             # Normal operation - create and run bridge
-            bridge = UtecHaBridge(**config)
+            bridge = UtecHaBridge(**config, dry_run=args.dry_run)
             
             # Set up signal handlers for clean shutdown
             def signal_handler(signum, frame):
@@ -569,6 +656,12 @@ def main():
                 logger.error("Failed to initialize bridge")
                 return 1
                 
+        except FileNotFoundError as e:
+            logger.error(f"Configuration error: {e}")
+            return 1
+        except ValueError as e:
+            logger.error(f"Configuration error: {e}")
+            return 1
         except Exception as e:
             logger.error(f"Application error: {e}", exc_info=True)
             return 1
