@@ -70,7 +70,7 @@ class UtecHaBridge:
             broker_port=mqtt_port,
             username=mqtt_username,
             password=mqtt_password,
-            command_handler=self._handle_command
+            command_handler=self._process_command  # Direct async handler
         )
         
         logger.info(f"Bridge initialized (update interval: {update_interval}s)")
@@ -122,14 +122,7 @@ class UtecHaBridge:
             logger.error(f"Initialization failed: {e}", exc_info=True)
             return False
     
-    def _handle_command(self, device_id: str, command: str):
-        """Handle MQTT commands (called from MQTT client)."""
-        try:
-            # Create async task for command processing
-            loop = asyncio.get_running_loop()
-            loop.create_task(self._process_command(device_id, command))
-        except Exception as e:
-            logger.error(f"Failed to handle command: {e}")
+    # Remove the old _handle_command method entirely - no longer needed
     
     async def _process_command(self, device_id: str, command: str):
         """Process commands asynchronously."""
@@ -339,6 +332,9 @@ class UtecHaBridge:
     
     async def run(self):
         """Run the main bridge loop with monitoring and command handling."""
+        # Set the event loop reference in the MQTT client
+        self.mqtt_client.set_event_loop(asyncio.get_running_loop())
+        
         logger.info("Starting bridge main loop...")
         logger.info(f"Status update interval: {self.update_interval} seconds")
         logger.info("Listening for MQTT commands...")

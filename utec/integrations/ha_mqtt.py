@@ -22,13 +22,14 @@ class UtecMQTTClient:
     
     def __init__(self, broker_host: str, broker_port: int = 1883, 
                  username: Optional[str] = None, password: Optional[str] = None,
-                 command_handler: Optional[Callable] = None):
+                 command_handler: Optional[Callable] = None, event_loop: Optional[asyncio.AbstractEventLoop] = None):
         """Initialize MQTT client with optional command handling."""
         self.broker_host = broker_host
         self.broker_port = broker_port
         self.username = username
         self.password = password
         self.command_handler = command_handler
+        self.event_loop = event_loop  # Store reference to main event loop
         
         # MQTT settings
         self.keepalive = 60
@@ -51,6 +52,10 @@ class UtecMQTTClient:
         self.max_reconnect_attempts = 10
         
         logger.info(f"U-tec MQTT client initialized for {broker_host}:{broker_port}")
+    
+    def set_event_loop(self, loop: asyncio.AbstractEventLoop):
+        """Set the event loop for async command handling."""
+        self.event_loop = loop
     
     def set_command_handler(self, handler: Callable[[str, str], None]):
         """Set the command handler function."""
@@ -163,8 +168,7 @@ class UtecMQTTClient:
             
             # Handle bridge commands (use constants)
             if topic == MQTT_TOPICS['bridge_command']:
-                if self.command_handler:
-                    self.command_handler("bridge", payload)
+                self._schedule_command("bridge", payload)
                 return
             
             # Handle lock commands
@@ -176,15 +180,46 @@ class UtecMQTTClient:
                 topic_parts[3] == 'command'):
                 
                 device_id = topic_parts[1]
-                if self.command_handler:
-                    self.command_handler(device_id, payload)
-                else:
-                    logger.warning(f"No command handler set for device {device_id}")
+                self._schedule_command(device_id, payload)
             else:
                 logger.warning(f"Unhandled topic format: {topic}")
                 
         except Exception as e:
             logger.error(f"Error processing message: {e}")
+    
+    def _schedule_command(self, device_id: str, command: str):
+        """Schedule command execution in the main event loop."""
+        if not self.command_handler:
+            logger.warning(f"No command handler set for device {device_id}")
+            return
+        
+        if not self.event_loop:
+            logger.error("No event loop set for command scheduling")
+            return
+        
+        try:
+            if self.event_loop.is_closed():
+                logger.error("Event loop is closed, cannot schedule command")
+                return
+            
+            # Schedule the command in the main event loop thread-safely
+            self.event_loop.call_soon_threadsafe(
+                lambda: asyncio.create_task(self._execute_async_command(device_id, command))
+            )
+            logger.debug(f"Scheduled command {command} for device {device_id}")
+            
+        except Exception as e:
+            logger.error(f"Failed to schedule command: {e}")
+    
+    async def _execute_async_command(self, device_id: str, command: str):
+        """Execute the command handler asynchronously."""
+        try:
+            if asyncio.iscoroutinefunction(self.command_handler):
+                await self.command_handler(device_id, command)
+            else:
+                self.command_handler(device_id, command)
+        except Exception as e:
+            logger.error(f"Command handler failed: {e}")
     
     def _on_log(self, client, userdata, level, buf):
         """Handle MQTT client logs."""
