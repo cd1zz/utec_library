@@ -1,46 +1,60 @@
 """
-Simplified MQTT client for U-tec smart locks and Home Assistant integration.
+Enhanced MQTT client for U-tec smart locks with command handling.
 Follows KISS, YAGNI, and SOLID principles.
 """
 
 import json
 import logging
 import time
+import asyncio
+from typing import Dict, Any, Optional, Callable, List
 import paho.mqtt.client as mqtt
-from typing import Dict, Any, Optional
+
+# Import constants
+from ..utils.constants import BATTERY_LEVEL, LOCK_MODE, BOLT_STATUS
+from .ha_constants import HA_LOCK_STATES, HA_BATTERY_LEVELS, MQTT_TOPICS, HA_LOCK_DISCOVERY_CONFIG
 
 logger = logging.getLogger(__name__)
 
 
 class UtecMQTTClient:
-    """Simple MQTT client for U-tec locks with Home Assistant integration."""
+    """Enhanced MQTT client for U-tec locks with bidirectional communication."""
     
     def __init__(self, broker_host: str, broker_port: int = 1883, 
-                 username: Optional[str] = None, password: Optional[str] = None):
-        """Initialize MQTT client with minimal required configuration."""
+                 username: Optional[str] = None, password: Optional[str] = None,
+                 command_handler: Optional[Callable] = None):
+        """Initialize MQTT client with optional command handling."""
         self.broker_host = broker_host
         self.broker_port = broker_port
         self.username = username
         self.password = password
+        self.command_handler = command_handler
         
         # MQTT settings
         self.keepalive = 60
         self.qos = 1
         self.retain = False
         
-        # Topic configuration
-        self.discovery_prefix = "homeassistant"
-        self.device_prefix = "utec"
+        # Topic configuration (use constants)
+        self.discovery_prefix = MQTT_TOPICS['discovery_prefix']
+        self.device_prefix = MQTT_TOPICS['device_prefix']
         
         # Connection state
         self.connected = False
         self.client = None
+        
+        # Command subscriptions
+        self.device_subscriptions: List[str] = []
         
         # Reconnection settings
         self.reconnect_delay = 5.0
         self.max_reconnect_attempts = 10
         
         logger.info(f"U-tec MQTT client initialized for {broker_host}:{broker_port}")
+    
+    def set_command_handler(self, handler: Callable[[str, str], None]):
+        """Set the command handler function."""
+        self.command_handler = handler
     
     def connect(self) -> bool:
         """Connect to MQTT broker with simple retry logic."""
@@ -62,6 +76,7 @@ class UtecMQTTClient:
             
             if self.connected:
                 logger.info("Successfully connected to MQTT broker")
+                self._setup_initial_subscriptions()
                 return True
             else:
                 logger.error("Failed to connect within timeout period")
@@ -85,6 +100,14 @@ class UtecMQTTClient:
         except (ImportError, TypeError):
             client = mqtt.Client(client_id=client_id)
         
+        # Set Last Will and Testament (use constants)
+        client.will_set(
+            MQTT_TOPICS['bridge_availability'], 
+            "offline", 
+            qos=1, 
+            retain=True
+        )
+        
         # Set authentication if provided
         if self.username and self.password:
             client.username_pw_set(self.username, self.password)
@@ -92,6 +115,7 @@ class UtecMQTTClient:
         # Set callbacks
         client.on_connect = self._on_connect
         client.on_disconnect = self._on_disconnect
+        client.on_message = self._on_message
         client.on_log = self._on_log
         
         return client
@@ -101,6 +125,13 @@ class UtecMQTTClient:
         if rc == 0:
             self.connected = True
             logger.info("Connected to MQTT broker")
+            
+            # Publish availability immediately (use constants)
+            self.publish(MQTT_TOPICS['bridge_availability'], "online", retain=True)
+            
+            # Resubscribe to all topics
+            self._resubscribe_all()
+            
         else:
             self.connected = False
             error_messages = {
@@ -122,6 +153,39 @@ class UtecMQTTClient:
         else:
             logger.info("Clean disconnect")
     
+    def _on_message(self, client, userdata, msg):
+        """Handle incoming MQTT messages."""
+        try:
+            topic = msg.topic
+            payload = msg.payload.decode('utf-8')
+            
+            logger.info(f"MQTT message received: {topic} -> {payload}")
+            
+            # Handle bridge commands (use constants)
+            if topic == MQTT_TOPICS['bridge_command']:
+                if self.command_handler:
+                    self.command_handler("bridge", payload)
+                return
+            
+            # Handle lock commands
+            # Topic format: utec/{device_id}/lock/command
+            topic_parts = topic.split('/')
+            if (len(topic_parts) == 4 and 
+                topic_parts[0] == self.device_prefix and 
+                topic_parts[2] == 'lock' and 
+                topic_parts[3] == 'command'):
+                
+                device_id = topic_parts[1]
+                if self.command_handler:
+                    self.command_handler(device_id, payload)
+                else:
+                    logger.warning(f"No command handler set for device {device_id}")
+            else:
+                logger.warning(f"Unhandled topic format: {topic}")
+                
+        except Exception as e:
+            logger.error(f"Error processing message: {e}")
+    
     def _on_log(self, client, userdata, level, buf):
         """Handle MQTT client logs."""
         if level == mqtt.MQTT_LOG_ERR:
@@ -130,6 +194,51 @@ class UtecMQTTClient:
             logger.warning(f"MQTT: {buf}")
         else:
             logger.debug(f"MQTT: {buf}")
+    
+    def _setup_initial_subscriptions(self):
+        """Set up initial MQTT subscriptions."""
+        if not self.connected:
+            return
+        
+        # Subscribe to bridge commands (use constants)
+        bridge_topic = MQTT_TOPICS['bridge_command']
+        self.client.subscribe(bridge_topic, qos=self.qos)
+        logger.info(f"Subscribed to {bridge_topic}")
+        
+        # Subscribe to wildcard for device commands (use constants)
+        wildcard_topic = f"{self.device_prefix}/+/lock/command"
+        self.client.subscribe(wildcard_topic, qos=self.qos)
+        logger.info(f"Subscribed to {wildcard_topic}")
+    
+    def subscribe_to_device_commands(self, device_id: str):
+        """Subscribe to commands for a specific device."""
+        if not self.connected:
+            logger.warning(f"Cannot subscribe to {device_id}: not connected")
+            return False
+        
+        topic = f"{self.device_prefix}/{device_id}/lock/command"
+        
+        if topic not in self.device_subscriptions:
+            result = self.client.subscribe(topic, qos=self.qos)
+            if result[0] == mqtt.MQTT_ERR_SUCCESS:
+                self.device_subscriptions.append(topic)
+                logger.info(f"Subscribed to commands for device {device_id}")
+                return True
+            else:
+                logger.error(f"Failed to subscribe to {topic}")
+                return False
+        
+        return True  # Already subscribed
+    
+    def _resubscribe_all(self):
+        """Resubscribe to all topics after reconnection."""
+        # Resubscribe to bridge commands
+        self._setup_initial_subscriptions()
+        
+        # Resubscribe to all device commands
+        for topic in self.device_subscriptions:
+            self.client.subscribe(topic, qos=self.qos)
+            logger.debug(f"Resubscribed to {topic}")
     
     def _attempt_reconnect(self):
         """Simple reconnection with limited retries."""
@@ -181,6 +290,49 @@ class UtecMQTTClient:
             logger.error(f"Publish error for {topic}: {e}")
             return False
     
+    def publish_bridge_health(self, health_data: Dict[str, Any]) -> bool:
+        """Publish bridge health status."""
+        return self.publish(MQTT_TOPICS['bridge_health'], health_data, retain=False)
+    
+    def setup_bridge_discovery(self, device_info: Dict[str, Any], sensors: List[Dict[str, Any]]) -> bool:
+        """Set up Home Assistant auto-discovery for bridge monitoring."""
+        if not self.connected:
+            logger.error("Cannot setup bridge discovery: not connected")
+            return False
+        
+        success = True
+        
+        # Publish discovery messages for each sensor
+        for sensor in sensors:
+            sensor["device"] = device_info
+            sensor["unique_id"] = sensor["object_id"]
+            
+            discovery_topic = f"{self.discovery_prefix}/sensor/utec_bridge/{sensor['object_id']}/config"
+            if not self.publish(discovery_topic, sensor, retain=True):
+                success = False
+                logger.error(f"Failed to publish discovery for {sensor['name']}")
+        
+        # Binary sensor for connectivity (use constants)
+        binary_sensor = {
+            "name": "Utec Bridge Online",
+            "object_id": "utec_bridge_online",
+            "state_topic": MQTT_TOPICS['bridge_availability'],
+            "payload_on": "online",
+            "payload_off": "offline", 
+            "device_class": "connectivity",
+            "device": device_info,
+            "unique_id": "utec_bridge_online"
+        }
+        
+        discovery_topic = f"{self.discovery_prefix}/binary_sensor/utec_bridge/utec_bridge_online/config"
+        if not self.publish(discovery_topic, binary_sensor, retain=True):
+            success = False
+        
+        if success:
+            logger.info("Bridge auto-discovery setup complete")
+        
+        return success
+    
     def setup_lock_discovery(self, lock) -> bool:
         """Set up Home Assistant discovery for U-tec lock."""
         if not self.connected:
@@ -191,22 +343,20 @@ class UtecMQTTClient:
         device_name = self._get_device_name(lock)
         device_info = self._create_device_info(lock)
         
-        # Discovery configurations for U-tec lock
+        # Subscribe to commands for this device
+        self.subscribe_to_device_commands(device_id)
+        
+        # Discovery configurations for U-tec lock (use constants for base config)
         discoveries = [
             # Main lock entity
             ("lock", f"{device_id}_lock", {
                 "name": f"{device_name} Lock",
                 "unique_id": f"{device_id}_lock",
                 "device": device_info,
-                "state_topic": f"{self.device_prefix}/{device_id}/lock/state",
-                "command_topic": f"{self.device_prefix}/{device_id}/lock/command",
-                "payload_lock": "LOCK",
-                "payload_unlock": "UNLOCK",
-                "state_locked": "LOCKED", 
-                "state_unlocked": "UNLOCKED",
-                "optimistic": False,
+                "state_topic": MQTT_TOPICS['lock_state'].format(device_id=device_id),
+                "command_topic": MQTT_TOPICS['lock_command'].format(device_id=device_id),
                 "qos": self.qos,
-                "device_class": "lock"
+                **HA_LOCK_DISCOVERY_CONFIG['lock']
             }),
             
             # Battery sensor
@@ -214,11 +364,8 @@ class UtecMQTTClient:
                 "name": f"{device_name} Battery",
                 "unique_id": f"{device_id}_battery",
                 "device": device_info,
-                "state_topic": f"{self.device_prefix}/{device_id}/battery/state",
-                "unit_of_measurement": "%",
-                "device_class": "battery",
-                "state_class": "measurement",
-                "entity_category": "diagnostic"
+                "state_topic": MQTT_TOPICS['battery_state'].format(device_id=device_id),
+                **HA_LOCK_DISCOVERY_CONFIG['battery']
             }),
             
             # Lock mode sensor  
@@ -226,9 +373,8 @@ class UtecMQTTClient:
                 "name": f"{device_name} Lock Mode",
                 "unique_id": f"{device_id}_lock_mode",
                 "device": device_info,
-                "state_topic": f"{self.device_prefix}/{device_id}/lock_mode/state",
-                "icon": "mdi:lock-outline",
-                "entity_category": "diagnostic"
+                "state_topic": MQTT_TOPICS['lock_mode_state'].format(device_id=device_id),
+                **HA_LOCK_DISCOVERY_CONFIG['lock_mode']
             }),
             
             # Autolock time sensor
@@ -236,10 +382,8 @@ class UtecMQTTClient:
                 "name": f"{device_name} Autolock Time", 
                 "unique_id": f"{device_id}_autolock",
                 "device": device_info,
-                "state_topic": f"{self.device_prefix}/{device_id}/autolock/state",
-                "unit_of_measurement": "s",
-                "icon": "mdi:timer-outline",
-                "entity_category": "config"
+                "state_topic": MQTT_TOPICS['autolock_state'].format(device_id=device_id),
+                **HA_LOCK_DISCOVERY_CONFIG['autolock']
             }),
             
             # Mute status sensor
@@ -247,32 +391,26 @@ class UtecMQTTClient:
                 "name": f"{device_name} Mute",
                 "unique_id": f"{device_id}_mute", 
                 "device": device_info,
-                "state_topic": f"{self.device_prefix}/{device_id}/mute/state",
-                "payload_on": "True",
-                "payload_off": "False",
-                "icon": "mdi:volume-off",
-                "entity_category": "diagnostic"
+                "state_topic": MQTT_TOPICS['mute_state'].format(device_id=device_id),
+                **HA_LOCK_DISCOVERY_CONFIG['mute']
             })
         ]
         
-        # Add signal strength sensor if available
+        # Add signal strength sensor if available (use constants)
         if hasattr(lock, 'rssi') or hasattr(lock, 'signal_strength'):
             discoveries.append(("sensor", f"{device_id}_signal", {
                 "name": f"{device_name} Signal Strength",
                 "unique_id": f"{device_id}_signal",
                 "device": device_info,
-                "state_topic": f"{self.device_prefix}/{device_id}/signal/state",
-                "unit_of_measurement": "dBm",
-                "device_class": "signal_strength",
-                "state_class": "measurement", 
-                "entity_category": "diagnostic"
+                "state_topic": MQTT_TOPICS['signal_state'].format(device_id=device_id),
+                **HA_LOCK_DISCOVERY_CONFIG['signal']
             }))
         
         # Publish all discovery configurations
         success = True
         for component, object_id, config in discoveries:
             topic = f"{self.discovery_prefix}/{component}/{object_id}/config"
-            if not self.publish(topic, config):
+            if not self.publish(topic, config, retain=True):
                 success = False
                 logger.error(f"Failed to publish discovery for {object_id}")
         
@@ -290,32 +428,6 @@ class UtecMQTTClient:
         device_id = self._get_device_id(lock)
         device_name = self._get_device_name(lock)
         
-        # U-tec specific state mappings
-        lock_states = {
-            0: "UNAVAILABLE",
-            1: "UNLOCKED", 
-            2: "LOCKED",
-            3: "JAMMED",
-            -1: "UNKNOWN",
-            255: "NOTAVAILABLE"
-        }
-        
-        lock_modes = {
-            0: "Normal",
-            1: "Passage Mode", 
-            2: "Lockout Mode",
-            -1: "Unknown"
-        }
-        
-        # U-tec battery level mappings
-        battery_levels = {
-            -1: 0,   # Unknown
-            0: 10,   # Critical
-            1: 25,   # Low
-            2: 60,   # Medium  
-            3: 90    # High
-        }
-        
         # Get raw values from lock
         raw_lock_status = getattr(lock, 'lock_status', -1)
         raw_battery = getattr(lock, 'battery', -1)
@@ -323,15 +435,15 @@ class UtecMQTTClient:
         raw_autolock = getattr(lock, 'autolock_time', 0)
         raw_mute = getattr(lock, 'mute', False)
         
-        # Convert to HA values
-        ha_lock_state = lock_states.get(raw_lock_status, "UNKNOWN")
-        ha_battery = battery_levels.get(raw_battery, 0)
-        ha_lock_mode = lock_modes.get(raw_lock_mode, "Unknown")
+        # Convert to HA values using constants
+        ha_lock_state = HA_LOCK_STATES.get(raw_lock_status, "UNKNOWN")
+        ha_battery = HA_BATTERY_LEVELS.get(raw_battery, 0)
+        ha_lock_mode = LOCK_MODE.get(raw_lock_mode, "Unknown")
         
         # Log the sensor values being published
         logger.info(f"Publishing states for {device_name}:")
-        logger.info(f"  Lock: {ha_lock_state} (raw: {raw_lock_status})")
-        logger.info(f"  Battery: {ha_battery}% (raw: {raw_battery})")
+        logger.info(f"  Lock: {ha_lock_state} (raw: {raw_lock_status}, meaning: {BOLT_STATUS.get(raw_lock_status, 'Unknown')})")
+        logger.info(f"  Battery: {ha_battery}% (raw: {raw_battery}, meaning: {BATTERY_LEVEL.get(raw_battery, 'Unknown')})")
         logger.info(f"  Lock Mode: {ha_lock_mode} (raw: {raw_lock_mode})")
         logger.info(f"  Autolock: {raw_autolock}s")
         logger.info(f"  Mute: {raw_mute}")
@@ -342,20 +454,20 @@ class UtecMQTTClient:
         elif hasattr(lock, 'signal_strength'):
             logger.info(f"  Signal: {lock.signal_strength} dBm")
         
-        # Prepare state updates
+        # Prepare state updates (use constants for topics)
         states = [
-            (f"{self.device_prefix}/{device_id}/lock/state", ha_lock_state),
-            (f"{self.device_prefix}/{device_id}/battery/state", ha_battery),
-            (f"{self.device_prefix}/{device_id}/lock_mode/state", ha_lock_mode),
-            (f"{self.device_prefix}/{device_id}/autolock/state", raw_autolock),
-            (f"{self.device_prefix}/{device_id}/mute/state", str(raw_mute))
+            (MQTT_TOPICS['lock_state'].format(device_id=device_id), ha_lock_state),
+            (MQTT_TOPICS['battery_state'].format(device_id=device_id), ha_battery),
+            (MQTT_TOPICS['lock_mode_state'].format(device_id=device_id), ha_lock_mode),
+            (MQTT_TOPICS['autolock_state'].format(device_id=device_id), raw_autolock),
+            (MQTT_TOPICS['mute_state'].format(device_id=device_id), str(raw_mute))
         ]
         
-        # Add signal strength if available
+        # Add signal strength if available (use constants)
         if hasattr(lock, 'rssi'):
-            states.append((f"{self.device_prefix}/{device_id}/signal/state", lock.rssi))
+            states.append((MQTT_TOPICS['signal_state'].format(device_id=device_id), lock.rssi))
         elif hasattr(lock, 'signal_strength'):
-            states.append((f"{self.device_prefix}/{device_id}/signal/state", lock.signal_strength))
+            states.append((MQTT_TOPICS['signal_state'].format(device_id=device_id), lock.signal_strength))
         
         # Publish all states
         success = True
@@ -402,6 +514,10 @@ class UtecMQTTClient:
         """Gracefully disconnect from MQTT broker."""
         if self.client and self.connected:
             logger.info("Disconnecting from MQTT broker")
+            
+            # Publish offline status before disconnecting (use constants)
+            self.publish(MQTT_TOPICS['bridge_availability'], "offline", retain=True)
+            
             self.client.loop_stop()
             self.client.disconnect()
             self.connected = False
