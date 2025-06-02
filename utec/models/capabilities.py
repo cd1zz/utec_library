@@ -425,7 +425,6 @@ class DeviceLockUBoltPro(DeviceDefinition):
         self.shakeopen = True
         self.havesn = True
         self.moreadmin = True
-        self.needreadmodel = True
         self.keypad = True
         self.lockout = True
         self.timelimit = True
@@ -433,6 +432,8 @@ class DeviceLockUBoltPro(DeviceDefinition):
         self.bt264 = True
         self.doorsensor = True
         self.keepalive = True
+        self.bt2640ByJoe = True  
+        self.needreadmodel = False  # ← Pro models don't need model reading
 
 
 class GenericLock(DeviceDefinition):

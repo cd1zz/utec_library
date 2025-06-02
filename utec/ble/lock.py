@@ -91,30 +91,54 @@ class UtecBleLock(UtecBleDevice, BaseLock):
             raise
 
     async def async_unlock(self, update: bool = True) -> None:
-        """Unlock the lock.
-        
-        Args:
-            update: Whether to update the lock status after unlocking.
-        """
+        """Unlock the lock."""
         logger.info(f"Unlocking {self.name}...")
+        
+        # Create unlock request with UID and password data
+        unlock_data = bytearray()
+        
+        # Append UID (4 bytes, little endian)
+        uid_bytes = bytearray(int(self.uid).to_bytes(4, "little"))
+        unlock_data.extend(uid_bytes)
+        
+        # Append password with length encoding
+        password_bytes = bytearray(int(self.password).to_bytes(4, "little"))
+        password_bytes[3] = (len(self.password) << 4) | password_bytes[3]
+        unlock_data.extend(password_bytes)
+        
+        logger.debug(f"[{self.mac_uuid}] Unlock data: UID={self.uid}, Password length={len(self.password)}")
+        logger.debug(f"[{self.mac_uuid}] Unlock payload: {unlock_data.hex()}")
+        
+        self.add_request(UtecBleRequest(BLECommandCode.UNLOCK, data=bytes(unlock_data)), priority=True)
         
         if update:
             self.add_request(UtecBleRequest(BLECommandCode.LOCK_STATUS))
-        self.add_request(UtecBleRequest(BLECommandCode.UNLOCK), priority=True)
 
         await self.send_requests()
 
     async def async_lock(self, update: bool = True) -> None:
-        """Lock the lock.
-        
-        Args:
-            update: Whether to update the lock status after locking.
-        """
+        """Lock the lock."""
         logger.info(f"Locking {self.name}...")
+        
+        # Create lock request with UID and password data  
+        lock_data = bytearray()
+        
+        # Append UID (4 bytes, little endian)
+        uid_bytes = bytearray(int(self.uid).to_bytes(4, "little"))
+        lock_data.extend(uid_bytes)
+        
+        # Append password with length encoding
+        password_bytes = bytearray(int(self.password).to_bytes(4, "little"))
+        password_bytes[3] = (len(self.password) << 4) | password_bytes[3]
+        lock_data.extend(password_bytes)
+        
+        logger.debug(f"[{self.mac_uuid}] Lock data: UID={self.uid}, Password length={len(self.password)}")
+        logger.debug(f"[{self.mac_uuid}] Lock payload: {lock_data.hex()}")
+        
+        self.add_request(UtecBleRequest(BLECommandCode.BOLT_LOCK, data=bytes(lock_data)), priority=True)
         
         if update:
             self.add_request(UtecBleRequest(BLECommandCode.LOCK_STATUS))
-        self.add_request(UtecBleRequest(BLECommandCode.BOLT_LOCK), priority=True)
 
         await self.send_requests()
 
@@ -171,8 +195,10 @@ class UtecBleLock(UtecBleDevice, BaseLock):
         """Update the lock status."""
         logger.info(f"Updating status for {self.name}...")
         
-        #self.add_request(UtecBleRequest(BLECommandCode.ADMIN_LOGIN))
+        # Primary status command (works reliably for U-Bolt-PRO)
         self.add_request(UtecBleRequest(BLECommandCode.LOCK_STATUS))
+        
+        # Only use legacy commands for non-bt264 devices
         if not self.capabilities.bt264:
             self.add_request(UtecBleRequest(BLECommandCode.GET_LOCK_STATUS))
             self.add_request(UtecBleRequest(BLECommandCode.GET_BATTERY))

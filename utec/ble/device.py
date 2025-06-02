@@ -960,7 +960,7 @@ class UtecBleDeviceKey:
     async def get_ecc_key(client: BleakClient, device: UtecBleDevice) -> bytes:
         """Get the ECC key for a device with detailed logging."""
         mac_uuid = device.mac_uuid
-        logger.debug(f"[{mac_uuid}] Starting ECC key exchange")
+        logger.debug(f"[{mac_uuid}] Starting ECC key exchange for U-Bolt-PRO")
         
         try:
             # Generate our key pair
@@ -972,47 +972,73 @@ class UtecBleDeviceKey:
             pub_y = public_key.pubkey.point.y().to_bytes(16, "little")
             
             logger.debug(f"[{mac_uuid}] Generated public key coordinates ({len(pub_x)} + {len(pub_y)} bytes)")
+            logger.debug(f"[{mac_uuid}] Our X coordinate: {pub_x.hex()}")
+            logger.debug(f"[{mac_uuid}] Our Y coordinate: {pub_y.hex()}")
 
             notification_event = asyncio.Event()
 
             def notification_handler(sender, data):
-                logger.debug(f"[{mac_uuid}] Received ECC data: {len(data)} bytes")
+                logger.debug(f"[{mac_uuid}] Received ECC notification from {sender}")
+                logger.debug(f"[{mac_uuid}] Data length: {len(data)} bytes")
+                logger.debug(f"[{mac_uuid}] Data hex: {data.hex()}")
+                
                 received_pubkey.append(data)
+                logger.debug(f"[{mac_uuid}] Total coordinates received: {len(received_pubkey)}/2")
+                
                 if len(received_pubkey) == 2:
-                    logger.debug(f"[{mac_uuid}] Received both ECC coordinates")
+                    logger.debug(f"[{mac_uuid}] Received both ECC coordinates - setting event")
                     notification_event.set()
+                elif len(received_pubkey) > 2:
+                    logger.warning(f"[{mac_uuid}] Received more than 2 coordinates: {len(received_pubkey)}")
 
-            logger.debug(f"[{mac_uuid}] Starting ECC notifications")
+            logger.debug(f"[{mac_uuid}] Starting ECC notifications on {DeviceKeyUUID.ECC.value}")
             await client.start_notify(DeviceKeyUUID.ECC.value, notification_handler)
             
-            logger.debug(f"[{mac_uuid}] Sending X coordinate")
+            logger.debug(f"[{mac_uuid}] Sending X coordinate: {pub_x.hex()}")
             await client.write_gatt_char(DeviceKeyUUID.ECC.value, pub_x)
             
-            logger.debug(f"[{mac_uuid}] Sending Y coordinate")
+            # Add small delay for device processing
+            await asyncio.sleep(0.1)
+            
+            logger.debug(f"[{mac_uuid}] Sending Y coordinate: {pub_y.hex()}")
             await client.write_gatt_char(DeviceKeyUUID.ECC.value, pub_y)
             
             logger.debug(f"[{mac_uuid}] Waiting for device's public key...")
-            await asyncio.wait_for(notification_event.wait(), timeout=10.0)
+            await asyncio.wait_for(notification_event.wait(), timeout=15.0)
 
             await client.stop_notify(DeviceKeyUUID.ECC.value)
             logger.debug(f"[{mac_uuid}] ECC notifications stopped")
 
+            # Validate received data
+            if len(received_pubkey) != 2:
+                raise Exception(f"Expected 2 ECC coordinates, got {len(received_pubkey)}")
+
+            if len(received_pubkey[0]) != 16 or len(received_pubkey[1]) != 16:
+                raise Exception(f"Invalid coordinate lengths: {len(received_pubkey[0])}, {len(received_pubkey[1])}")
+
+            logger.debug(f"[{mac_uuid}] Device X coordinate: {received_pubkey[0].hex()}")
+            logger.debug(f"[{mac_uuid}] Device Y coordinate: {received_pubkey[1].hex()}")
+
             # Calculate shared secret
             logger.debug(f"[{mac_uuid}] Calculating shared secret")
-            rec_key_point = Point(
-                SECP128r1.curve,
-                int.from_bytes(received_pubkey[0], "little"),
-                int.from_bytes(received_pubkey[1], "little"),
-            )
-            shared_point = private_key.privkey.secret_multiplier * rec_key_point
-            shared_key = int.to_bytes(shared_point.x(), 16, "little")
+            try:
+                rec_key_point = Point(
+                    SECP128r1.curve,
+                    int.from_bytes(received_pubkey[0], "little"),
+                    int.from_bytes(received_pubkey[1], "little"),
+                )
+                shared_point = private_key.privkey.secret_multiplier * rec_key_point
+                shared_key = int.to_bytes(shared_point.x(), 16, "little")
+            except Exception as e:
+                logger.error(f"[{mac_uuid}] Failed to calculate shared point: {e}")
+                raise Exception(f"ECC point calculation failed: {e}")
             
             logger.info(f"[{mac_uuid}] ECC key exchange completed successfully")
             logger.debug(f"[{mac_uuid}] Shared key: {shared_key.hex()}")
             return shared_key
             
         except asyncio.TimeoutError:
-            logger.error(f"[{mac_uuid}] ECC key exchange timed out")
+            logger.error(f"[{mac_uuid}] ECC key exchange timed out after 15 seconds")
             raise device.error(Exception("ECC key exchange timed out"))
         except Exception as e:
             logger.error(f"[{mac_uuid}] ECC key exchange failed: {str(e)}", exc_info=True)
