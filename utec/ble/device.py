@@ -272,24 +272,40 @@ class UtecBleDevice(BaseBleDevice):
             async with OperationTimeout("connection_establishment", 20.0, self.mac_uuid):
                 self._current_operation = "connection_establishment"
                 logger.debug(f"[{self.mac_uuid}] Establishing BLE connection")
-                
-                try:
-                    client = await establish_connection(
-                        client_class=BleakClient,
-                        device=device,
-                        name=self.mac_uuid,
-                        max_attempts=config.ble_max_retries,
-                        ble_device_callback=self._brc_get_lock_device,
-                    )
-                    logger.info(f"[{self.mac_uuid}] BLE connection established successfully")
-                    
-                except (BleakNotFoundError, BleakError) as e:
-                    logger.error(f"[{self.mac_uuid}] Connection failed: {str(e)}")
-                    raise self.error(
-                        UtecBleNotFoundError(
-                            f"Could not connect to device {self.name}({self.mac_uuid}): {str(e)}"
+
+                attempt = 0
+                while attempt < config.ble_max_retries:
+                    try:
+                        client = await establish_connection(
+                            client_class=BleakClient,
+                            device=device,
+                            name=self.mac_uuid,
+                            max_attempts=1,
+                            ble_device_callback=self._brc_get_lock_device,
                         )
-                    ) from None
+                        logger.info(f"[{self.mac_uuid}] BLE connection established successfully")
+                        break
+
+                    except (BleakNotFoundError, BleakError) as e:
+                        attempt += 1
+                        logger.warning(
+                            f"[{self.mac_uuid}] Connection attempt {attempt} failed: {str(e)}"
+                        )
+                        if attempt >= config.ble_max_retries:
+                            logger.info(
+                                f"[{self.mac_uuid}] Unable to connect. Try moving the device closer or restarting Bluetooth."
+                            )
+                            raise self.error(
+                                UtecBleNotFoundError(
+                                    f"Could not connect to device {self.name}({self.mac_uuid}): {str(e)}"
+                                )
+                            ) from None
+
+                        logger.debug(f"[{self.mac_uuid}] Performing fresh scan before retry")
+                        device = await self._get_bledevice(self.mac_uuid)
+                        if not device:
+                            logger.warning(f"[{self.mac_uuid}] Device not found during retry scan")
+                        await asyncio.sleep(config.ble_retry_delay)
 
             # Key exchange phase
             async with OperationTimeout("key_exchange", 15.0, self.mac_uuid):
