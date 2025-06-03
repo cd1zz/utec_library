@@ -363,12 +363,20 @@ class UtecBleDevice(BaseBleDevice):
             
             logger.debug(f"[{self.mac_uuid}] Clearing device busy flag")
             self.is_busy = False
-            
+
+            # Calculate total elapsed time before resetting tracking values
+            total_elapsed = (
+                time.time() - self._operation_start_time
+                if self._operation_start_time
+                else 0
+            )
+
             self._current_operation = None
             self._operation_start_time = None
-            
-            total_elapsed = time.time() - self._operation_start_time if self._operation_start_time else 0
-            logger.debug(f"[{self.mac_uuid}] Cleanup completed, total operation time: {total_elapsed:.2f}s")
+
+            logger.debug(
+                f"[{self.mac_uuid}] Cleanup completed, total operation time: {total_elapsed:.2f}s"
+            )
 
     async def _get_bledevice(self, address: str) -> Optional[BLEDevice]:
             """Get BLE device with enhanced logging."""
