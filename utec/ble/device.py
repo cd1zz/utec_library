@@ -51,11 +51,21 @@ class OperationTimeout:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         elapsed = time.time() - self.start_time if self.start_time else 0
         if exc_type is asyncio.TimeoutError:
-            logger.error(f"[{self.device_mac}] TIMEOUT in {self.operation_name} after {elapsed:.2f}s")
+            logger.error(
+                f"[{self.device_mac}] TIMEOUT in {self.operation_name} after {elapsed:.2f}s"
+            )
+            if exc_val:
+                logger.debug(
+                    f"[{self.device_mac}] Timeout details: {type(exc_val).__name__}: {exc_val}"
+                )
         elif exc_type:
-            logger.error(f"[{self.device_mac}] ERROR in {self.operation_name} after {elapsed:.2f}s: {exc_val}")
+            logger.error(
+                f"[{self.device_mac}] ERROR in {self.operation_name} after {elapsed:.2f}s: {exc_val}"
+            )
         else:
-            logger.debug(f"[{self.device_mac}] Completed {self.operation_name} in {elapsed:.2f}s")
+            logger.debug(
+                f"[{self.device_mac}] Completed {self.operation_name} in {elapsed:.2f}s"
+            )
 
 
 class UtecBleNotFoundError(Exception):
@@ -291,6 +301,12 @@ class UtecBleDevice(BaseBleDevice):
                         logger.warning(
                             f"[{self.mac_uuid}] Connection attempt {attempt} failed: {str(e)}"
                         )
+
+                        if any(term in str(e).lower() for term in ["dbus", "org.bluez"]):
+                            logger.error(
+                                f"[{self.mac_uuid}] D-Bus/BlueZ error detected. Bluetooth stack may need a reset via 'bluetoothctl restart' or system reboot."
+                            )
+
                         if attempt >= config.ble_max_retries:
                             logger.info(
                                 f"[{self.mac_uuid}] Unable to connect. Try moving the device closer or restarting Bluetooth."
@@ -492,7 +508,14 @@ class UtecBleDevice(BaseBleDevice):
                 except asyncio.TimeoutError:
                     logger.error(f"[{self.mac_uuid}] BLE discovery scan timed out")
                 except Exception as e:
-                    logger.error(f"[{self.mac_uuid}] Error during device search: {e}")
+                    logger.error(
+                        f"[{self.mac_uuid}] Error during device search: {e}"
+                    )
+
+                    if any(term in str(e).lower() for term in ["dbus", "org.bluez"]):
+                        logger.error(
+                            f"[{self.mac_uuid}] BlueZ may be unresponsive. Try 'bluetoothctl restart' or rebooting the system."
+                        )
                     
                     # For the specific "operation in progress" error, wait longer
                     if "Operation already in progress" in str(e):
