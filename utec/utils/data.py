@@ -20,7 +20,7 @@ def date_from_4bytes(byte_array: bytes) -> Optional[datetime.datetime]:
     byte_to_int4 = struct.unpack('>I', byte_array[:4])[0]
     seconds = byte_to_int4 & 63
     year = ((byte_to_int4 >> 26) & 63) + 2000
-    month = ((byte_to_int4 >> 22) - 1) & 15
+    month = (byte_to_int4 >> 22) & 15
     day = (byte_to_int4 >> 17) & 31
     hour = (byte_to_int4 >> 12) & 31
     minute = (byte_to_int4 >> 6) & 63
