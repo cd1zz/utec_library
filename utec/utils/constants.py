@@ -1,13 +1,13 @@
 """Constants for the U-tec library."""
 
 # Battery level constants
-BATTERY_LEVEL = {-1:"Depleted", 0:"Replace", 1:"Low", 2:"Medium", 3:"High"}
+BATTERY_LEVEL = {-1:"Unavailable", 0:"Replace", 1:"Low", 2:"Medium", 3:"High"}
 
 # Lock mode constants
 LOCK_MODE = {0:"Normal", 1:"Passage Mode", 2:"Lockout Mode"}
 
 # Bolt status constants
-BOLT_STATUS = {0: "Unavailable", 1:"Unlocked",2:"Locked",3:"Jammed", 255:"Unavailable"}
+BOLT_STATUS = {0: "Unavailable", 1:"Unlocked", 2:"Locked", 3:"Jammed", 255:"Unavailable"}
 
 # CRC8 table for calculating checksums
 CRC8Table = [0, 94, 188, 226, 97, 63, 221, 131, 194, 156, 126, 32, 163, 253, 31, 65, 
