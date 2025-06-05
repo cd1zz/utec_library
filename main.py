@@ -90,6 +90,9 @@ class UtecHaBridge:
             if not self.mqtt_client.connect():
                 logger.error("Failed to connect to MQTT broker")
                 return False
+
+            # Ensure the MQTT client has a reference to the current event loop
+            self.mqtt_client.set_event_loop(asyncio.get_running_loop())
             
             logger.info("Discovering U-tec devices...")
             self.locks = await utec.discover_devices(self.utec_email, self.utec_password)
