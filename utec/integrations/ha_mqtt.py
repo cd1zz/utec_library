@@ -527,13 +527,20 @@ class UtecMQTTClient:
         """Remove U-tec lock device from Home Assistant."""
         if not self.connected:
             return False
-        
+
         device_id = self._get_device_id(lock)
-        
+
+        # Unsubscribe from the device's command topic
+        topic = f"{self.device_prefix}/{device_id}/lock/command"
+        if self.client:
+            self.client.unsubscribe(topic)
+        if topic in self.device_subscriptions:
+            self.device_subscriptions.remove(topic)
+
         # Remove all discovery configurations by publishing empty payloads
         components = [
             ("lock", f"{device_id}_lock"),
-            ("sensor", f"{device_id}_battery"), 
+            ("sensor", f"{device_id}_battery"),
             ("sensor", f"{device_id}_lock_mode"),
             ("sensor", f"{device_id}_autolock"),
             ("binary_sensor", f"{device_id}_mute"),
@@ -555,10 +562,15 @@ class UtecMQTTClient:
         """Gracefully disconnect from MQTT broker."""
         if self.client and self.connected:
             logger.info("Disconnecting from MQTT broker")
-            
+
             # Publish offline status before disconnecting (use constants)
             self.publish(MQTT_TOPICS['bridge_availability'], "offline", retain=True)
-            
+
+            # Unsubscribe from all device command topics
+            for topic in list(self.device_subscriptions):
+                self.client.unsubscribe(topic)
+            self.device_subscriptions.clear()
+
             self.client.loop_stop()
             self.client.disconnect()
             self.connected = False
