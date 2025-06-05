@@ -188,12 +188,18 @@ class UtecHaBridge:
             else:
                 # Execute actual command
                 if command.upper() == "LOCK":
-                    await lock.async_lock(update=True)
-                    logger.info(f"Successfully locked {lock.name}")
-                    
+                    success = await lock.async_lock(update=True)
+                    if success:
+                        logger.info(f"Successfully locked {lock.name}")
+                    else:
+                        logger.error(f"Failed to lock {lock.name}")
+
                 elif command.upper() == "UNLOCK":
-                    await lock.async_unlock(update=True)
-                    logger.info(f"Successfully unlocked {lock.name}")
+                    success = await lock.async_unlock(update=True)
+                    if success:
+                        logger.info(f"Successfully unlocked {lock.name}")
+                    else:
+                        logger.error(f"Failed to unlock {lock.name}")
                     
                 else:
                     logger.warning(f"Unknown command: {command}")

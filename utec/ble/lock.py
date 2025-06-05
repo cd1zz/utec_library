@@ -90,8 +90,12 @@ class UtecBleLock(UtecBleDevice, BaseLock):
             logger.error(f"Error creating lock from JSON: {str(e)}")
             raise
 
-    async def async_unlock(self, update: bool = True) -> None:
-        """Unlock the lock."""
+    async def async_unlock(self, update: bool = True) -> bool:
+        """Unlock the lock.
+
+        Returns:
+            True if the command completed successfully, False otherwise.
+        """
         logger.info(f"Unlocking {self.name}...")
         
         # Create unlock request with UID and password data
@@ -114,10 +118,14 @@ class UtecBleLock(UtecBleDevice, BaseLock):
         if update:
             self.add_request(UtecBleRequest(BLECommandCode.LOCK_STATUS))
 
-        await self.send_requests()
+        return await self.send_requests()
 
-    async def async_lock(self, update: bool = True) -> None:
-        """Lock the lock."""
+    async def async_lock(self, update: bool = True) -> bool:
+        """Lock the lock.
+
+        Returns:
+            True if the command completed successfully, False otherwise.
+        """
         logger.info(f"Locking {self.name}...")
         
         # Create lock request with UID and password data  
@@ -140,7 +148,7 @@ class UtecBleLock(UtecBleDevice, BaseLock):
         if update:
             self.add_request(UtecBleRequest(BLECommandCode.LOCK_STATUS))
 
-        await self.send_requests()
+        return await self.send_requests()
 
     async def async_reboot(self) -> bool:
         """Reboot the lock.
