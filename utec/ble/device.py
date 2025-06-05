@@ -422,6 +422,12 @@ class UtecBleDevice(BaseBleDevice):
             
             # Check cache first
             current_time = time.time()
+
+            # prune cache
+            expired = [addr for addr, (ts, _) in self._scan_cache.items()
+                       if current_time - ts >= self._scan_cache_ttl]
+            for addr in expired:
+                del self._scan_cache[addr]
             if address in self._scan_cache:
                 cache_time, device = self._scan_cache[address]
                 if current_time - cache_time < self._scan_cache_ttl:
