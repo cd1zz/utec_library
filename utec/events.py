@@ -48,7 +48,7 @@ class Event:
     type: EventType
     source: Any
     data: Dict[str, Any] = field(default_factory=dict)
-    timestamp: float = field(default_factory=asyncio.get_event_loop().time)
+    timestamp: float = field(default_factory=lambda: asyncio.get_event_loop().time())
     
     def __post_init__(self):
         """Set default values."""
