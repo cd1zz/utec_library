@@ -85,10 +85,16 @@ class UtecMQTTClient:
                 return True
             else:
                 logger.error("Failed to connect within timeout period")
+                if self.client:
+                    self.client.loop_stop()
+                    self.client.disconnect()
                 return False
-                
+
         except Exception as e:
             logger.error(f"Connection error: {e}")
+            if self.client:
+                self.client.loop_stop()
+                self.client.disconnect()
             return False
     
     def _create_client(self) -> mqtt.Client:
