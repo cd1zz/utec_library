@@ -146,13 +146,21 @@ class BaseLock(BaseBleDevice):
     """Base class for lock devices."""
     
     @abstractmethod
-    async def async_unlock(self, update: bool = True) -> None:
-        """Unlock the lock."""
+    async def async_unlock(self, update: bool = True) -> bool:
+        """Unlock the lock.
+
+        Returns:
+            True if the command completed successfully, False otherwise.
+        """
         pass
     
     @abstractmethod
-    async def async_lock(self, update: bool = True) -> None:
-        """Lock the lock."""
+    async def async_lock(self, update: bool = True) -> bool:
+        """Lock the lock.
+
+        Returns:
+            True if the command completed successfully, False otherwise.
+        """
         pass
     
     @abstractmethod
