@@ -347,8 +347,11 @@ class UtecMQTTClient:
         for sensor in sensors:
             sensor["device"] = device_info
             sensor["unique_id"] = sensor["object_id"]
+            # Replace deprecated object_id with default_entity_id
+            sensor["default_entity_id"] = f"sensor.{sensor['object_id']}"
+            del sensor["object_id"]  # Remove deprecated field
             
-            discovery_topic = f"{self.discovery_prefix}/sensor/utec_bridge/{sensor['object_id']}/config"
+            discovery_topic = f"{self.discovery_prefix}/sensor/utec_bridge/{sensor['unique_id']}/config"
             if not self.publish(discovery_topic, sensor, retain=True):
                 success = False
                 logger.error(f"Failed to publish discovery for {sensor['name']}")
@@ -356,7 +359,7 @@ class UtecMQTTClient:
         # Binary sensor for connectivity (use constants)
         binary_sensor = {
             "name": "Utec Bridge Online",
-            "object_id": "utec_bridge_online",
+            "default_entity_id": "binary_sensor.utec_bridge_online",
             "state_topic": MQTT_TOPICS['bridge_availability'],
             "payload_on": "online",
             "payload_off": "offline", 
@@ -393,6 +396,7 @@ class UtecMQTTClient:
             ("lock", f"{device_id}_lock", {
                 "name": f"{device_name} Lock",
                 "unique_id": f"{device_id}_lock",
+                "default_entity_id": f"lock.{device_id}_lock",
                 "device": device_info,
                 "state_topic": MQTT_TOPICS['lock_state'].format(device_id=device_id),
                 "command_topic": MQTT_TOPICS['lock_command'].format(device_id=device_id),
@@ -404,6 +408,7 @@ class UtecMQTTClient:
             ("sensor", f"{device_id}_battery", {
                 "name": f"{device_name} Battery",
                 "unique_id": f"{device_id}_battery",
+                "default_entity_id": f"sensor.{device_id}_battery",
                 "device": device_info,
                 "state_topic": MQTT_TOPICS['battery_state'].format(device_id=device_id),
                 **HA_LOCK_DISCOVERY_CONFIG['battery']
@@ -413,6 +418,7 @@ class UtecMQTTClient:
             ("sensor", f"{device_id}_lock_mode", {
                 "name": f"{device_name} Lock Mode",
                 "unique_id": f"{device_id}_lock_mode",
+                "default_entity_id": f"sensor.{device_id}_lock_mode",
                 "device": device_info,
                 "state_topic": MQTT_TOPICS['lock_mode_state'].format(device_id=device_id),
                 **HA_LOCK_DISCOVERY_CONFIG['lock_mode']
@@ -422,6 +428,7 @@ class UtecMQTTClient:
             ("sensor", f"{device_id}_autolock", {
                 "name": f"{device_name} Autolock Time", 
                 "unique_id": f"{device_id}_autolock",
+                "default_entity_id": f"sensor.{device_id}_autolock",
                 "device": device_info,
                 "state_topic": MQTT_TOPICS['autolock_state'].format(device_id=device_id),
                 **HA_LOCK_DISCOVERY_CONFIG['autolock']
@@ -430,7 +437,8 @@ class UtecMQTTClient:
             # Mute status sensor
             ("binary_sensor", f"{device_id}_mute", {
                 "name": f"{device_name} Mute",
-                "unique_id": f"{device_id}_mute", 
+                "unique_id": f"{device_id}_mute",
+                "default_entity_id": f"binary_sensor.{device_id}_mute", 
                 "device": device_info,
                 "state_topic": MQTT_TOPICS['mute_state'].format(device_id=device_id),
                 **HA_LOCK_DISCOVERY_CONFIG['mute']
@@ -442,6 +450,7 @@ class UtecMQTTClient:
             discoveries.append(("sensor", f"{device_id}_signal", {
                 "name": f"{device_name} Signal Strength",
                 "unique_id": f"{device_id}_signal",
+                "default_entity_id": f"sensor.{device_id}_signal",
                 "device": device_info,
                 "state_topic": MQTT_TOPICS['signal_state'].format(device_id=device_id),
                 **HA_LOCK_DISCOVERY_CONFIG['signal']
