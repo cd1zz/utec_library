@@ -75,7 +75,7 @@ HA_LOCK_DISCOVERY_CONFIG = {
     'autolock': {
         'unit_of_measurement': 's',
         'icon': 'mdi:timer-outline',
-        'entity_category': 'config'
+        'entity_category': 'diagnostic'
     },
     'mute': {
         'payload_on': 'True',
