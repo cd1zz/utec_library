@@ -448,7 +448,7 @@ class UtecClient(BaseUtecClient):
                 # Try to read the text instead
                 text = await resp.text()
                 logger.error(f"Response text: {text}")
-            except:
+            except Exception:
                 logger.error("Could not read response text")
             return {"error": "ResponseParseError", "message": str(e)}
 

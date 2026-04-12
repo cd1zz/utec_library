@@ -1,8 +1,11 @@
 """Data conversion utilities for the U-tec library."""
 
 import datetime
+import logging
 import struct
 from typing import Optional, Union, Any
+
+logger = logging.getLogger(__name__)
 
 
 def date_from_4bytes(byte_array: bytes) -> Optional[datetime.datetime]:
@@ -144,7 +147,7 @@ def decode_password(password: Union[int, str]) -> str:
             return str4
         return str3
     except Exception as e:
-        print(f"Error decoding password: {e}")
+        logger.error(f"Error decoding password: {e}")
         return str(password)
 
 

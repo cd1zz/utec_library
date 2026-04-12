@@ -218,8 +218,8 @@ class UtecHaBridge:
                 try:
                     await self._update_lock_status(lock)
                     self.mqtt_client.update_lock_state(lock)
-                except:
-                    pass
+                except Exception as e:
+                    logger.error(f"Failed to update status after error: {e}")
     
     def _setup_bridge_discovery(self):
         """Set up Home Assistant auto-discovery for bridge monitoring."""

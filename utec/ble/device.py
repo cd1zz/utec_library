@@ -523,21 +523,20 @@ class UtecBleDevice(BaseBleDevice):
                             f"[{self.mac_uuid}] BlueZ may be unresponsive. Try 'bluetoothctl restart' or rebooting the system."
                         )
                     
-                    # For the specific "operation in progress" error, wait longer
+                    # For the specific "operation in progress" error, retry with escalating waits
                     if "Operation already in progress" in str(e):
-                        logger.warning(f"[{self.mac_uuid}] BLE scan in progress, waiting 10s...")
-                        await asyncio.sleep(10)
-                        
-                        # Try one more time after waiting
-                        try:
-                            device = await asyncio.wait_for(get_device(address), timeout=3.0)
-                            if device:
-                                logger.info(f"[{self.mac_uuid}] Device found after retry")
-                                self._scan_cache[address] = (current_time, device)
-                                self._last_scan_time = current_time
-                                return device
-                        except Exception:
-                            logger.debug(f"[{self.mac_uuid}] Retry after wait also failed")
+                        for wait in (3, 7):
+                            logger.warning(f"[{self.mac_uuid}] BLE scan in progress, waiting {wait}s...")
+                            await asyncio.sleep(wait)
+                            try:
+                                device = await asyncio.wait_for(get_device(address), timeout=3.0)
+                                if device:
+                                    logger.info(f"[{self.mac_uuid}] Device found after retry")
+                                    self._scan_cache[address] = (current_time, device)
+                                    self._last_scan_time = current_time
+                                    return device
+                            except Exception:
+                                logger.debug(f"[{self.mac_uuid}] Retry after {wait}s wait failed")
                 
                 self._last_scan_time = current_time
                 logger.warning(f"[{self.mac_uuid}] Device not found after all attempts")
