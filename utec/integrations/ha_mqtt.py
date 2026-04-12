@@ -47,9 +47,8 @@ class UtecMQTTClient:
         # Command subscriptions
         self.device_subscriptions: List[str] = []
         
-        # Reconnection settings
-        self.reconnect_delay = 5.0
-        self.max_reconnect_attempts = 10
+        # Reconnection is handled by paho-mqtt's built-in auto-reconnect
+        # (configured via reconnect_delay_set in _create_client)
         
         logger.info(f"U-tec MQTT client initialized for {broker_host}:{broker_port}")
     
@@ -100,7 +99,7 @@ class UtecMQTTClient:
     def _create_client(self) -> mqtt.Client:
         """Create and configure MQTT client."""
         client_id = f"utec-ha-{int(time.time())}"
-        
+
         # Handle paho-mqtt version differences
         try:
             from paho.mqtt.client import CallbackAPIVersion
@@ -110,25 +109,28 @@ class UtecMQTTClient:
             )
         except (ImportError, TypeError):
             client = mqtt.Client(client_id=client_id)
-        
+
         # Set Last Will and Testament (use constants)
         client.will_set(
-            MQTT_TOPICS['bridge_availability'], 
-            "offline", 
-            qos=1, 
+            MQTT_TOPICS['bridge_availability'],
+            "offline",
+            qos=1,
             retain=True
         )
-        
+
+        # Enable built-in auto-reconnect with exponential backoff
+        client.reconnect_delay_set(min_delay=1, max_delay=120)
+
         # Set authentication if provided
         if self.username and self.password:
             client.username_pw_set(self.username, self.password)
-        
+
         # Set callbacks
         client.on_connect = self._on_connect
         client.on_disconnect = self._on_disconnect
         client.on_message = self._on_message
         client.on_log = self._on_log
-        
+
         return client
     
     def _on_connect(self, client, userdata, flags, rc):
@@ -156,11 +158,15 @@ class UtecMQTTClient:
             logger.error(f"Connection failed: {error}")
     
     def _on_disconnect(self, client, userdata, rc):
-        """Handle disconnect events."""
+        """Handle disconnect events.
+
+        For unexpected disconnects (rc != 0), paho-mqtt's built-in
+        auto-reconnect (configured via reconnect_delay_set) handles
+        retries automatically on the loop thread. We must not block here.
+        """
         self.connected = False
         if rc != 0:
-            logger.warning(f"Unexpected disconnect (rc: {rc})")
-            self._attempt_reconnect()
+            logger.warning(f"Unexpected disconnect (rc: {rc}), auto-reconnect will retry")
         else:
             logger.info("Clean disconnect")
     
@@ -280,26 +286,6 @@ class UtecMQTTClient:
         for topic in self.device_subscriptions:
             self.client.subscribe(topic, qos=self.qos)
             logger.debug(f"Resubscribed to {topic}")
-    
-    def _attempt_reconnect(self):
-        """Simple reconnection with limited retries."""
-        attempt = 0
-        
-        while not self.connected and attempt < self.max_reconnect_attempts:
-            attempt += 1
-            logger.info(f"Reconnection attempt {attempt}/{self.max_reconnect_attempts}")
-            
-            time.sleep(self.reconnect_delay)
-            
-            try:
-                self.client.reconnect()
-                # Wait a moment for connection
-                time.sleep(1)
-            except Exception as e:
-                logger.error(f"Reconnection attempt {attempt} failed: {e}")
-        
-        if not self.connected:
-            logger.error("Max reconnection attempts exceeded")
     
     def publish(self, topic: str, payload: Any, qos: Optional[int] = None, retain: Optional[bool] = None) -> bool:
         """Publish message to MQTT broker with flexible QoS and retain settings."""

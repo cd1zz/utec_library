@@ -3,12 +3,16 @@
 This module provides an event system that allows components to
 subscribe to events and be notified when they occur.
 """
+import logging
+import time
 from enum import Enum, auto
 from typing import Dict, Set, Callable, Any, Optional, List, Union
 import asyncio
 import functools
 import inspect
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 
 class EventType(Enum):
@@ -48,7 +52,7 @@ class Event:
     type: EventType
     source: Any
     data: Dict[str, Any] = field(default_factory=dict)
-    timestamp: float = field(default_factory=lambda: asyncio.get_event_loop().time())
+    timestamp: float = field(default_factory=time.time)
     
     def __post_init__(self):
         """Set default values."""
@@ -64,6 +68,14 @@ class Event:
         """String representation of the event."""
         source_name = getattr(self.source, "name", str(self.source))
         return f"Event({self.type.name}, source={source_name}, data={self.data})"
+
+
+async def _safe_dispatch(handler, event):
+    """Run an async event handler and log any exception instead of losing it."""
+    try:
+        await handler(event)
+    except Exception as e:
+        logger.error(f"Error in async event handler: {e}")
 
 
 class EventEmitter:
@@ -230,14 +242,14 @@ class EventDispatcher:
             try:
                 # Check if the handler is a coroutine function
                 if inspect.iscoroutinefunction(handler):
-                    # Create a task to run the handler asynchronously
-                    asyncio.create_task(handler(event))
+                    # Create a task with error logging so exceptions aren't silently lost
+                    asyncio.create_task(_safe_dispatch(handler, event))
                 else:
                     # Call the handler directly
                     handler(event)
             except Exception as e:
                 # Log the error but don't stop dispatching to other handlers
-                print(f"Error in event handler: {e}")
+                logger.error(f"Error in event handler: {e}")
     
     async def dispatch_async(self, event: Event) -> None:
         """Dispatch an event asynchronously to all subscribed handlers.
@@ -263,11 +275,14 @@ class EventDispatcher:
                     handler(event)
             except Exception as e:
                 # Log the error but don't stop dispatching to other handlers
-                print(f"Error in event handler: {e}")
+                logger.error(f"Error in event handler: {e}")
         
-        # Await all coroutines
+        # Await all coroutines and log any exceptions
         if coroutines:
-            await asyncio.gather(*coroutines, return_exceptions=True)
+            results = await asyncio.gather(*coroutines, return_exceptions=True)
+            for result in results:
+                if isinstance(result, Exception):
+                    logger.error(f"Error in async event handler: {result}")
 
 
 # Helper decorator for event handlers
@@ -292,8 +307,8 @@ def event_handler(
             return func(*args, **kwargs)
         
         # Register the handler
-        dispatcher = dispatcher or EventDispatcher.get_instance()
-        dispatcher.subscribe(event_type, func, source_filter)
+        _dispatcher = dispatcher or EventDispatcher.get_instance()
+        _dispatcher.subscribe(event_type, func, source_filter)
         
         return wrapper
     
