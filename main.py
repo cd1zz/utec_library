@@ -103,13 +103,29 @@ class UtecHaBridge:
                 return False
             
             logger.info("Discovering U-tec devices...")
-            self.locks = await utec.discover_devices(self.utec_email, self.utec_password)
-            
-            if not self.locks:
+            all_locks = await utec.discover_devices(self.utec_email, self.utec_password)
+
+            if not all_locks:
                 logger.warning("No U-tec devices found")
                 return False
-            
-            logger.info(f"Found {len(self.locks)} U-tec device(s)")
+
+            logger.info(f"Found {len(all_locks)} U-tec device(s)")
+
+            # Apply lock filter if configured
+            lock_filter = os.getenv('LOCK_FILTER', '').strip()
+            if lock_filter:
+                filters = [f.strip().upper() for f in lock_filter.split(',') if f.strip()]
+                self.locks = [
+                    lock for lock in all_locks
+                    if lock.mac_uuid.upper().replace(":", "_") in [f.replace(":", "_") for f in filters]
+                    or lock.name.upper() in filters
+                ]
+                skipped = len(all_locks) - len(self.locks)
+                logger.info(f"Lock filter active: managing {len(self.locks)} lock(s), skipping {skipped}")
+                for lock in self.locks:
+                    logger.info(f"  Managed: {lock.name} ({lock.mac_uuid})")
+            else:
+                self.locks = all_locks
             
             # Build device mapping for commands
             for lock in self.locks:
