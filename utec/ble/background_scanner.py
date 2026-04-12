@@ -113,13 +113,12 @@ class BleBackgroundScanner:
         self._start_time = time.time()
 
         # Create scanner with detection callback
+        # No service_uuids filter — some U-tec locks only advertise manufacturer
+        # data (0x0969) or device name, not the lock service UUID.
+        # Device validation happens in _is_utec_lock() instead.
         self._scanner = BleakScanner(
             detection_callback=self._detection_callback,
-            service_uuids=[
-                DeviceServiceUUID.LOCK.value,
-            ],
             scanning_mode="passive" if config.ble_scan_passive else "active",
-            # bluez=PASSIVE_SCANNER_ARGS if config.ble_scan_passive else None,
         )
 
         try:

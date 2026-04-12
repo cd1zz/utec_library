@@ -319,10 +319,25 @@ class UtecBleDevice(BaseBleDevice):
                                 )
                             ) from None
 
-                        logger.debug(f"[{self.mac_uuid}] Performing fresh scan before retry")
-                        device = await self._get_bledevice(self.mac_uuid)
+                        # Use BlueZ D-Bus lookup for a fresh device object.
+                        # After a failed connection, BlueZ may have removed the device
+                        # from managed objects. The background scanner's cached BLEDevice
+                        # has the same stale path, so get_device() is the right source.
+                        logger.debug(f"[{self.mac_uuid}] Refreshing device from BlueZ before retry")
+                        try:
+                            device = await asyncio.wait_for(get_device(self.mac_uuid), timeout=5.0)
+                        except Exception:
+                            device = None
                         if not device:
-                            logger.warning(f"[{self.mac_uuid}] Device not found during retry scan")
+                            logger.warning(f"[{self.mac_uuid}] Device not in BlueZ cache, waiting for re-registration")
+                            await asyncio.sleep(3.0)
+                            try:
+                                device = await asyncio.wait_for(get_device(self.mac_uuid), timeout=5.0)
+                            except Exception:
+                                device = None
+                        if not device:
+                            logger.warning(f"[{self.mac_uuid}] Device still not available, falling back to full lookup")
+                            device = await self._get_bledevice(self.mac_uuid)
                         await asyncio.sleep(config.ble_retry_delay)
 
             # Key exchange phase
@@ -470,92 +485,25 @@ class UtecBleDevice(BaseBleDevice):
                 except Exception as e:
                     logger.warning(f"[{self.mac_uuid}] Device callback error: {str(e)}")
             
-            # Use our own scanning method
-            async with self._scanner_lock:
-                logger.debug(f"[{self.mac_uuid}] Acquired scanner lock")
-                
-                # If we recently did a scan, wait a bit
-                if current_time - self._last_scan_time < 2:
-                    wait_time = 2 - (current_time - self._last_scan_time)
-                    logger.debug(f"[{self.mac_uuid}] Waiting {wait_time:.1f}s for Bluetooth to settle")
-                    await asyncio.sleep(wait_time)
-                
-                # Try discovery method first
-                try:
-                    logger.debug(f"[{self.mac_uuid}] Starting BLE discovery scan (timeout: {config.ble_scan_timeout}s)")
-                    scan_start = time.time()
-                    
-                    # Use the new method that returns both device and advertisement data
-                    discovered_devices_and_adv = await asyncio.wait_for(
-                        BleakScanner.discover(timeout=config.ble_scan_timeout, return_adv=True),
-                        timeout=config.ble_scan_timeout + 5.0
-                    )
-                    
-                    scan_elapsed = time.time() - scan_start
-                    logger.debug(f"[{self.mac_uuid}] Discovery scan completed in {scan_elapsed:.2f}s, found {len(discovered_devices_and_adv)} devices")
-                    
-                    # Look through discovered devices
-                    for device_address, (device, adv_data) in discovered_devices_and_adv.items():
-                        if device.address.upper() == address.upper():
-                            # Use RSSI from advertisement data instead of device.rssi
-                            rssi = adv_data.rssi if adv_data.rssi is not None else "unknown"
-                            logger.info(f"[{self.mac_uuid}] Device found in discovery: {device.name} (RSSI: {rssi})")
-                            
-                            # Update cache
-                            self._scan_cache[address] = (current_time, device)
-                            self._last_scan_time = current_time
-                            
-                            return device
-                    
-                    logger.debug(f"[{self.mac_uuid}] Device not found in discovery results")
-                    
-                    # If device not found via discovery, try direct method as fallback
-                    logger.debug(f"[{self.mac_uuid}] Trying direct device lookup")
-                    try:
-                        device = await asyncio.wait_for(get_device(address), timeout=3.0)
-                        if device:
-                            logger.info(f"[{self.mac_uuid}] Device found via direct lookup")
-                            
-                            # Update cache
-                            self._scan_cache[address] = (current_time, device)
-                            self._last_scan_time = current_time
-                            
-                            return device
-                    except asyncio.TimeoutError:
-                        logger.warning(f"[{self.mac_uuid}] Direct device lookup timed out")
-                    except Exception as e:
-                        logger.debug(f"[{self.mac_uuid}] Direct device lookup failed: {e}")
-                
-                except asyncio.TimeoutError:
-                    logger.error(f"[{self.mac_uuid}] BLE discovery scan timed out")
-                except Exception as e:
-                    logger.error(
-                        f"[{self.mac_uuid}] Error during device search: {e}"
-                    )
+            # Fall back to lightweight BlueZ D-Bus lookup (no scan needed).
+            # This avoids "Operation already in progress" conflicts with the
+            # background scanner which holds the adapter.
+            logger.debug(f"[{self.mac_uuid}] Trying BlueZ D-Bus lookup")
+            try:
+                device = await asyncio.wait_for(get_device(address), timeout=5.0)
+                if device:
+                    logger.info(f"[{self.mac_uuid}] Device found via BlueZ lookup")
+                    self._scan_cache[address] = (current_time, device)
+                    self._last_scan_time = current_time
+                    return device
+            except asyncio.TimeoutError:
+                logger.warning(f"[{self.mac_uuid}] BlueZ lookup timed out")
+            except Exception as e:
+                logger.debug(f"[{self.mac_uuid}] BlueZ lookup failed: {e}")
 
-                    if any(term in str(e).lower() for term in ["dbus", "org.bluez"]):
-                        logger.error(
-                            f"[{self.mac_uuid}] BlueZ may be unresponsive. Try 'bluetoothctl restart' or rebooting the system."
-                        )
-                    
-                    # For the specific "operation in progress" error, retry with escalating waits
-                    if "Operation already in progress" in str(e):
-                        for wait in (3, 7):
-                            logger.warning(f"[{self.mac_uuid}] BLE scan in progress, waiting {wait}s...")
-                            await asyncio.sleep(wait)
-                            try:
-                                device = await asyncio.wait_for(get_device(address), timeout=3.0)
-                                if device:
-                                    logger.info(f"[{self.mac_uuid}] Device found after retry")
-                                    self._scan_cache[address] = (current_time, device)
-                                    self._last_scan_time = current_time
-                                    return device
-                            except Exception:
-                                logger.debug(f"[{self.mac_uuid}] Retry after {wait}s wait failed")
-                
-                self._last_scan_time = current_time
-                logger.warning(f"[{self.mac_uuid}] Device not found after all attempts")
-                return None
+            self._last_scan_time = current_time
+            logger.warning(f"[{self.mac_uuid}] Device not found after all attempts")
+            return None
             
     async def _brc_get_lock_device(self) -> Optional[BLEDevice]:
         """Callback for bleak_retry_connector to get the lock device."""
