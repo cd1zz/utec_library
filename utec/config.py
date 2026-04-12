@@ -49,7 +49,13 @@ class UtecConfig:
     ble_retry_strategy: BLERetryStrategy = BLERetryStrategy.EXPONENTIAL
     ble_scan_timeout: float = 10.0  # seconds
     ble_scan_cache_ttl: float = 10.0  # seconds
-    
+
+    # Background scanning configuration
+    ble_background_scan_enabled: bool = True  # Enable continuous background scanning
+    ble_device_timeout: float = 60.0  # seconds before marking device unavailable
+    ble_scan_passive: bool = False  # Use passive scanning mode for lower power
+    ble_scan_interval: float = 2.0  # Scan interval in seconds
+
     # API configuration
     api_timeout: float = 5 * 60  # seconds
     api_retry_delay: float = 1.0  # seconds

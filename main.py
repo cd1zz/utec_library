@@ -24,6 +24,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import utec
 from utec.integrations.ha_mqtt import UtecMQTTClient
 from utec.integrations.ha_constants import MQTT_TOPICS
+from utec.ble.background_scanner import BleBackgroundScanner, set_background_scanner
+from utec.config import config
 
 # Configure logging
 if os.name == 'nt':  # Windows
@@ -65,6 +67,7 @@ class UtecHaBridge:
         self.start_time = time.time()
         self.last_successful_update = 0
         self.dry_run = dry_run
+        self.background_scanner: Optional[BleBackgroundScanner] = None
         
         if self.dry_run:
             logger.warning("DRY RUN MODE - No actual lock commands will be executed!")
@@ -85,7 +88,15 @@ class UtecHaBridge:
         try:
             logger.info("Initializing U-tec library...")
             utec.setup(log_level=utec.LogLevel.INFO)
-            
+
+            # Start background BLE scanner if enabled
+            if config.ble_background_scan_enabled:
+                logger.info("Starting background BLE scanner...")
+                self.background_scanner = BleBackgroundScanner()
+                set_background_scanner(self.background_scanner)
+                await self.background_scanner.start()
+                logger.info("Background BLE scanner started successfully")
+
             logger.info("Connecting to MQTT broker...")
             if not self.mqtt_client.connect():
                 logger.error("Failed to connect to MQTT broker")
@@ -191,6 +202,11 @@ class UtecHaBridge:
                     success = await lock.async_lock(update=True)
                     if success:
                         logger.info(f"Successfully locked {lock.name}")
+                        # Optimistically update lock state for faster HA feedback
+                        lock.bolt_status = 2
+                        lock.lock_status = 2
+                        self.mqtt_client.update_lock_state(lock)
+                        logger.info(f"Published optimistic locked state for {lock.name}")
                     else:
                         logger.error(f"Failed to lock {lock.name}")
 
@@ -198,6 +214,11 @@ class UtecHaBridge:
                     success = await lock.async_unlock(update=True)
                     if success:
                         logger.info(f"Successfully unlocked {lock.name}")
+                        # Optimistically update lock state for faster HA feedback
+                        lock.bolt_status = 1
+                        lock.lock_status = 1
+                        self.mqtt_client.update_lock_state(lock)
+                        logger.info(f"Published optimistic unlocked state for {lock.name}")
                     else:
                         logger.error(f"Failed to unlock {lock.name}")
                     
@@ -280,21 +301,57 @@ class UtecHaBridge:
             return False
     
     async def _update_all_locks(self):
-        """Update all locks and publish their states."""
+        """Update all locks and publish their states in parallel."""
         logger.info("Updating all lock states...")
-        
-        successful_updates = 0
+
+        # Create tasks for parallel execution
+        update_tasks = []
         for lock in self.locks:
-            if await self._update_lock_status(lock):
-                if self.mqtt_client.update_lock_state(lock):
-                    successful_updates += 1
-        
+            if lock.is_busy:
+                logger.debug(f"Skipping {lock.name} (busy)")
+                continue
+            task = asyncio.create_task(self._update_single_lock_with_publish(lock))
+            update_tasks.append((lock, task))
+
+        if not update_tasks:
+            logger.warning("All locks are busy, skipping update")
+            return
+
+        # Wait for all updates to complete
+        logger.info(f"Running {len(update_tasks)} lock updates in parallel...")
+        results = await asyncio.gather(*[task for _, task in update_tasks], return_exceptions=True)
+
+        # Count successful updates
+        successful_updates = 0
+        for (lock, _), result in zip(update_tasks, results):
+            if isinstance(result, Exception):
+                logger.error(f"Failed to update {lock.name}: {result}")
+            elif result:
+                successful_updates += 1
+            else:
+                logger.warning(f"Update returned False for {lock.name}")
+
         total_locks = len(self.locks)
-        if successful_updates == total_locks:
-            logger.info(f"Successfully updated all {total_locks} locks")
+        active_locks = len(update_tasks)
+        if successful_updates == active_locks:
+            logger.info(f"Successfully updated all {active_locks} active locks (total: {total_locks})")
             self.last_successful_update = time.time()
         else:
-            logger.warning(f"Updated {successful_updates}/{total_locks} locks")
+            logger.warning(f"Updated {successful_updates}/{active_locks} active locks (total: {total_locks})")
+
+    async def _update_single_lock_with_publish(self, lock) -> bool:
+        """Update a single lock and publish its state."""
+        try:
+            await lock.async_update_status()
+            logger.debug(f"Updated status for {lock.name}")
+            if self.mqtt_client.update_lock_state(lock):
+                return True
+            else:
+                logger.warning(f"Failed to publish state for {lock.name}")
+                return False
+        except Exception as e:
+            logger.error(f"Failed to update {lock.name}: {e}")
+            raise
     
     def _get_health_data(self) -> Dict[str, Any]:
         """Get bridge health data."""
@@ -323,6 +380,11 @@ class UtecHaBridge:
                     "last_status": getattr(lock, 'last_update_time', 0)
                 })
             
+            # Get background scanner metrics if available
+            scanner_metrics = {}
+            if self.background_scanner and config.ble_background_scan_enabled:
+                scanner_metrics = self.background_scanner.get_metrics()
+
             return {
                 "status": "online" if self.running else "offline",
                 "timestamp": time.time(),
@@ -337,7 +399,8 @@ class UtecHaBridge:
                     "disk_percent": (disk.used / disk.total) * 100,
                     "load_average": load_avg
                 },
-                "locks": lock_details
+                "locks": lock_details,
+                "ble_scanner": scanner_metrics
             }
             
         except Exception as e:
@@ -402,18 +465,25 @@ class UtecHaBridge:
             logger.error(f"Unexpected error in main loop: {e}", exc_info=True)
         finally:
             logger.info("Exiting main loop")
-            self.shutdown()
-    
-    def shutdown(self):
+            await self.shutdown()
+
+    async def shutdown(self):
         """Clean shutdown."""
         logger.info("Shutting down...")
         self.running = False
-        
+
+        # Stop background scanner if running
+        if self.background_scanner:
+            logger.info("Stopping background BLE scanner...")
+            await self.background_scanner.stop()
+            set_background_scanner(None)
+            logger.info("Background scanner stopped")
+
         # Disconnect MQTT client
         if self.mqtt_client:
             self.mqtt_client.disconnect()
             logger.info("MQTT client disconnected")
-        
+
         logger.info("Shutdown complete")
     
     def stop(self):
@@ -607,14 +677,21 @@ Examples:
     # Performance tuning  
     parser.add_argument('--update-interval', type=int,
                        help='Lock status update interval in seconds (overrides UPDATE_INTERVAL env var, default: 300)')
-    
+    parser.add_argument('--no-background-scan', action='store_true',
+                       help='Disable background BLE scanning (use traditional discovery)')
+
     args = parser.parse_args()
     
     # Setup logging level
     if args.verbose or args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
         logger.debug("Debug logging enabled")
-    
+
+    # Configure background scanning
+    if args.no_background_scan:
+        config.configure(ble_background_scan_enabled=False)
+        logger.info("Background BLE scanning disabled")
+
     async def async_main():
         bridge = None
         
@@ -673,8 +750,8 @@ Examples:
             return 1
         finally:
             if bridge:
-                bridge.shutdown()
-    
+                await bridge.shutdown()
+
     return asyncio.run(async_main())
 
 
