@@ -31,6 +31,8 @@ from ..utils.constants import LOCK_MODE, BOLT_STATUS, BATTERY_LEVEL, CRC8Table
 from ..utils.enums import BleResponseCode, BLECommandCode, DeviceServiceUUID, DeviceKeyUUID
 from ..utils.data import decode_password, bytes_to_int2
 from ..models.capabilities import DeviceDefinition, GenericLock, known_devices
+from .background_scanner import get_background_scanner
+from .key_cache import get_key_cache
 
 
 class OperationTimeout:
@@ -436,7 +438,20 @@ class UtecBleDevice(BaseBleDevice):
                 else:
                     logger.debug(f"[{self.mac_uuid}] Cache expired (age: {current_time - cache_time:.1f}s)")
             
-            # If callback is provided, use it first
+            # Check background scanner first if enabled
+            background_scanner = get_background_scanner()
+            if background_scanner and config.ble_background_scan_enabled:
+                logger.debug(f"[{self.mac_uuid}] Checking background scanner for device")
+                result = background_scanner.get_device(address)
+                if result:
+                    device, adv_data = result
+                    logger.info(f"[{self.mac_uuid}] Device found via background scanner (RSSI: {adv_data.rssi})")
+                    self._scan_cache[address] = (current_time, device)
+                    return device
+                else:
+                    logger.debug(f"[{self.mac_uuid}] Device not in background scanner registry")
+
+            # If callback is provided, use it next
             if self.async_bledevice_callback:
                 logger.debug(f"[{self.mac_uuid}] Trying device callback")
                 try:
@@ -983,33 +998,55 @@ class UtecBleDeviceKey:
         """Get the shared key for a device with comprehensive logging."""
         mac_uuid = device.mac_uuid
         logger.debug(f"[{mac_uuid}] Determining encryption method")
-        
+
+        # Check if we have a cached key
+        key_cache = get_key_cache()
+        cached_key = key_cache.get(mac_uuid)
+        if cached_key:
+            logger.info(f"[{mac_uuid}] Found cached encryption key, skipping key exchange")
+            return cached_key
+
+        # No cached key, perform normal key exchange
+        logger.debug(f"[{mac_uuid}] No cached key found, performing key exchange")
+
         # Check available characteristics
         static_char = client.services.get_characteristic(DeviceKeyUUID.STATIC.value)
         md5_char = client.services.get_characteristic(DeviceKeyUUID.MD5.value)
         ecc_char = client.services.get_characteristic(DeviceKeyUUID.ECC.value)
-        
+
         logger.debug(f"[{mac_uuid}] Available encryption methods - Static: {bool(static_char)}, MD5: {bool(md5_char)}, ECC: {bool(ecc_char)}")
-        
+
+        method = None
+        result = None
+
         if static_char:
+            method = "static"
             logger.info(f"[{mac_uuid}] Using static key encryption")
             key_data = await client.read_gatt_char(DeviceKeyUUID.STATIC.value)
             result = bytearray(b"Anviz.ut") + key_data
             logger.debug(f"[{mac_uuid}] Static key generated ({len(result)} bytes)")
-            return result
-            
+
         elif md5_char:
+            method = "MD5"
             logger.info(f"[{mac_uuid}] Using MD5 key encryption")
-            return await UtecBleDeviceKey.get_md5_key(client, device)
-            
+            result = await UtecBleDeviceKey.get_md5_key(client, device)
+
         elif ecc_char:
+            method = "ECC"
             logger.info(f"[{mac_uuid}] Using ECC key encryption")
-            return await UtecBleDeviceKey.get_ecc_key(client, device)
-            
+            result = await UtecBleDeviceKey.get_ecc_key(client, device)
+
         else:
             error_msg = f"No supported encryption method found"
             logger.error(f"[{mac_uuid}] {error_msg}")
             raise NotImplementedError(f"({client.address}) Unknown encryption.")
+
+        # Cache the successful key
+        if result and method:
+            key_cache.set(mac_uuid, bytes(result), method)
+            logger.info(f"[{mac_uuid}] Cached {method} encryption key for future use")
+
+        return result
 
     @staticmethod
     async def get_ecc_key(client: BleakClient, device: UtecBleDevice) -> bytes:
