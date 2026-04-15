@@ -2,8 +2,9 @@
 #   sudo apt-get install -y python3-dev gcc
 #
 aiohttp>=3.8.0
-bleak>=0.19.0
-bleak-retry-connector>=1.0.0
+bleak>=0.19.0,<1.0.0
+bleak-retry-connector>=1.0.0,<4.0.0
+dbus-fast>=2.0.0,<3.0.0
 ecdsa>=0.18.0
 pycryptodome>=3.18.0
 brotli
