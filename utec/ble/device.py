@@ -338,6 +338,13 @@ class UtecBleDevice(BaseBleDevice):
                         if not device:
                             logger.warning(f"[{self.mac_uuid}] Device still not available, falling back to full lookup")
                             device = await self._get_bledevice(self.mac_uuid)
+                        if not device:
+                            logger.error(f"[{self.mac_uuid}] Device unavailable after all lookup methods, aborting retries")
+                            raise self.error(
+                                UtecBleNotFoundError(
+                                    f"Device {self.name}({self.mac_uuid}) not found after connection failure"
+                                )
+                            )
                         await asyncio.sleep(config.ble_retry_delay)
 
             # Key exchange phase
@@ -392,6 +399,11 @@ class UtecBleDevice(BaseBleDevice):
         except Exception as e:
             elapsed = time.time() - self._operation_start_time if self._operation_start_time else 0
             logger.error(f"[{self.mac_uuid}] Operation failed after {elapsed:.2f}s in phase '{self._current_operation}': {str(e)}")
+            # Invalidate cached key — if the key was stale, next attempt will re-negotiate
+            key_cache = get_key_cache()
+            if key_cache.get(self.mac_uuid):
+                key_cache.remove(self.mac_uuid)
+                logger.info(f"[{self.mac_uuid}] Invalidated cached encryption key after failure")
             return False
             
         finally:
