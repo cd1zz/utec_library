@@ -233,8 +233,12 @@ class UtecBleDevice(BaseBleDevice):
         """Send all queued requests to the device with comprehensive logging."""
         self._current_operation = "send_requests"
         self._operation_start_time = time.time()
-        
+
         client: Optional[BleakClient] = None
+        # Serialize BLE ops per device. The is_busy flag is a TOCTOU guard in the
+        # bridge (main.py), but between check and set inside this function two
+        # callers can race. The lock closes that gap.
+        await self._scanner_lock.acquire()
         try:
             logger.info(f"[{self.mac_uuid}] Starting to send {len(self._requests)} request(s)")
             
@@ -292,7 +296,7 @@ class UtecBleDevice(BaseBleDevice):
                             client_class=BleakClient,
                             device=device,
                             name=self.mac_uuid,
-                            max_attempts=1,
+                            max_attempts=2,
                             ble_device_callback=self._brc_get_lock_device,
                         )
                         logger.info(f"[{self.mac_uuid}] BLE connection established successfully")
@@ -318,6 +322,15 @@ class UtecBleDevice(BaseBleDevice):
                                     f"Could not connect to device {self.name}({self.mac_uuid}): {str(e)}"
                                 )
                             ) from None
+
+                        # Evict the dead BLEDevice from every cache before retrying.
+                        # All three caches hold the same stale BlueZ path; without
+                        # eviction, _get_bledevice() would return the same dead
+                        # object that just failed.
+                        self._scan_cache.pop(self.mac_uuid.upper(), None)
+                        bg_scanner = get_background_scanner()
+                        if bg_scanner:
+                            bg_scanner.invalidate(self.mac_uuid.upper())
 
                         # Use BlueZ D-Bus lookup for a fresh device object.
                         # After a failed connection, BlueZ may have removed the device
@@ -434,6 +447,8 @@ class UtecBleDevice(BaseBleDevice):
 
             self._current_operation = None
             self._operation_start_time = None
+
+            self._scanner_lock.release()
 
             logger.debug(
                 f"[{self.mac_uuid}] Cleanup completed, total operation time: {total_elapsed:.2f}s"

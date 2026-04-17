@@ -284,6 +284,17 @@ class BleBackgroundScanner:
                 self._metrics["registry_misses"] += 1
                 return None
 
+    def invalidate(self, address: str) -> bool:
+        """Drop a device from the registry so the next advertisement re-registers it
+        with a fresh BlueZ path. Call this after a connection attempt fails with
+        'device disappeared' — the cached BLEDevice's D-Bus path is stale."""
+        with self._registry_lock:
+            if address in self._device_registry:
+                del self._device_registry[address]
+                logger.info(f"Invalidated cached device {address}")
+                return True
+            return False
+
     def get_device_by_serial(
         self, serial: str
     ) -> Optional[Tuple[BLEDevice, AdvertisementData]]:

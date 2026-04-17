@@ -44,7 +44,9 @@ class UtecConfig:
     
     # BLE configuration
     ble_retry_delay: float = 1.5  # seconds
-    ble_max_retries: int = 4
+    # Outer retry loop count. Each attempt runs establish_connection with its own
+    # max_attempts=2 inner retries, so total attempts = ble_max_retries * 2.
+    ble_max_retries: int = 2
     ble_connection_timeout: float = 30.0  # seconds
     ble_retry_strategy: BLERetryStrategy = BLERetryStrategy.EXPONENTIAL
     ble_scan_timeout: float = 10.0  # seconds

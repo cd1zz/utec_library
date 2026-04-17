@@ -89,12 +89,19 @@ class UtecHaBridge:
             logger.info("Initializing U-tec library...")
             utec.setup(log_level=utec.LogLevel.INFO)
 
-            # Start background BLE scanner if enabled
+            # Start background BLE scanner if enabled. Only register the global
+            # after start() succeeds — otherwise a failed start leaves a dead
+            # scanner registered, and _get_bledevice() would treat it as live.
             if config.ble_background_scan_enabled:
                 logger.info("Starting background BLE scanner...")
-                self.background_scanner = BleBackgroundScanner()
-                set_background_scanner(self.background_scanner)
-                await self.background_scanner.start()
+                scanner = BleBackgroundScanner()
+                try:
+                    await scanner.start()
+                except Exception:
+                    set_background_scanner(None)
+                    raise
+                self.background_scanner = scanner
+                set_background_scanner(scanner)
                 logger.info("Background BLE scanner started successfully")
 
             logger.info("Connecting to MQTT broker...")
