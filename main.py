@@ -156,10 +156,18 @@ class UtecHaBridge:
                 # from a previous session's retained availability message.
                 self.mqtt_client.publish_availability(lock, available=True)
 
-                # Get initial status and publish
-                await self._update_lock_status(lock)
-                self.mqtt_client.update_lock_state(lock)
-                logger.info(f"Successfully set up {lock.name}")
+                # Get initial status. Only publish state if the BLE read
+                # actually succeeded — otherwise lock_status is still -1
+                # ("UNKNOWN") and pushing that to HA flips the entity to
+                # `unknown` immediately after the availability transition,
+                # which spams any "from: unavailable" automations with
+                # "now unknown" messages on every restart.
+                if await self._update_lock_status(lock):
+                    self.mqtt_client.update_lock_state(lock)
+                    logger.info(f"Successfully set up {lock.name}")
+                else:
+                    logger.warning(
+                        f"Initial BLE read failed for {lock.name}; leaving HA state untouched until next periodic poll succeeds")
             
             logger.info("Bridge initialization complete")
             return True
