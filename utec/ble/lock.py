@@ -199,13 +199,20 @@ class UtecBleLock(UtecBleDevice, BaseLock):
             )
         await self.send_requests()
 
-    async def async_update_status(self) -> None:
-        """Update the lock status."""
+    async def async_update_status(self) -> bool:
+        """Update the lock status.
+
+        Returns:
+            True if all queued BLE requests succeeded, False otherwise.
+            send_requests() swallows BLE exceptions internally and reports
+            success via return value, so callers that need to distinguish a
+            real read from a stale cached value MUST check this bool.
+        """
         logger.info(f"Updating status for {self.name}...")
-        
+
         # Primary status command (works reliably for U-Bolt-PRO)
         self.add_request(UtecBleRequest(BLECommandCode.LOCK_STATUS))
-        
+
         # Only use legacy commands for non-bt264 devices
         if not self.capabilities.bt264:
             self.add_request(UtecBleRequest(BLECommandCode.GET_LOCK_STATUS))
@@ -215,5 +222,9 @@ class UtecBleLock(UtecBleDevice, BaseLock):
         if self.capabilities.autolock:
             self.add_request(UtecBleRequest(BLECommandCode.GET_AUTOLOCK))
 
-        await self.send_requests()
-        logger.info(f"Status update completed for {self.name}")
+        ok = await self.send_requests()
+        if ok:
+            logger.info(f"Status update completed for {self.name}")
+        else:
+            logger.warning(f"Status update failed for {self.name}")
+        return ok

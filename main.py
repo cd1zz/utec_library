@@ -317,15 +317,21 @@ class UtecHaBridge:
             logger.error(f"Failed to setup bridge discovery: {e}")
     
     async def _update_lock_status(self, lock) -> bool:
-        """Update a single lock's status."""
+        """Update a single lock's status.
+
+        Returns True only if the BLE read actually succeeded — used on
+        startup and after command execution where failures are logged but
+        don't feed into the availability counter.
+        """
         try:
             if lock.is_busy:
                 logger.debug(f"Skipping status update for {lock.name} (busy)")
                 return False
-                
-            await lock.async_update_status()
-            logger.debug(f"Updated status for {lock.name}")
-            return True
+
+            ok = await lock.async_update_status()
+            if ok:
+                logger.debug(f"Updated status for {lock.name}")
+            return ok
         except Exception as e:
             logger.error(f"Failed to update {lock.name}: {e}")
             return False
@@ -376,31 +382,27 @@ class UtecHaBridge:
         publish 'offline' to the lock's availability topic so HA stops
         displaying a potentially-stale lock state. Recovery publishes 'online'
         before the fresh state so HA processes availability first.
+
+        Note: ``async_update_status`` both raises on unexpected errors AND
+        returns False when ``send_requests`` swallows a BLE connection error
+        internally. Both paths must count as a failure here — otherwise a
+        lock that can't be reached would appear healthy.
         """
         device_id = lock.mac_uuid.replace(":", "_").lower()
+        ble_ok = False
+        failure_detail: Optional[str] = None
         try:
-            await lock.async_update_status()
-            logger.debug(f"Updated status for {lock.name}")
-
-            # Recovery: if we were previously marked offline, bring the lock
-            # back online before publishing fresh state.
-            prior_failures = self.consecutive_failures.get(device_id, 0)
-            if prior_failures >= self.unavailable_after_failures:
-                logger.info(
-                    f"[{lock.name}] Recovered after {prior_failures} consecutive failures; marking online")
-                self.mqtt_client.publish_availability(lock, available=True)
-            self.consecutive_failures[device_id] = 0
-
-            if self.mqtt_client.update_lock_state(lock):
-                return True
-            else:
-                logger.warning(f"Failed to publish state for {lock.name}")
-                return False
+            ble_ok = await lock.async_update_status()
+            if not ble_ok:
+                failure_detail = "BLE read returned failure"
         except Exception as e:
+            failure_detail = str(e)
+
+        if not ble_ok:
             count = self.consecutive_failures.get(device_id, 0) + 1
             self.consecutive_failures[device_id] = count
             logger.error(
-                f"Failed to update {lock.name} (consecutive failure {count}/{self.unavailable_after_failures}): {e}")
+                f"Failed to update {lock.name} (consecutive failure {count}/{self.unavailable_after_failures}): {failure_detail}")
             # Publish 'offline' exactly when we cross the threshold. Subsequent
             # failures leave the retained 'offline' message in place.
             if count == self.unavailable_after_failures:
@@ -408,6 +410,19 @@ class UtecHaBridge:
                     f"[{lock.name}] Threshold reached; marking Unavailable in HA to avoid publishing stale state")
                 self.mqtt_client.publish_availability(lock, available=False)
             return False
+
+        # Success path: recover availability, reset counter, publish fresh state.
+        prior_failures = self.consecutive_failures.get(device_id, 0)
+        if prior_failures >= self.unavailable_after_failures:
+            logger.info(
+                f"[{lock.name}] Recovered after {prior_failures} consecutive failures; marking online")
+            self.mqtt_client.publish_availability(lock, available=True)
+        self.consecutive_failures[device_id] = 0
+
+        if self.mqtt_client.update_lock_state(lock):
+            return True
+        logger.warning(f"Failed to publish state for {lock.name}")
+        return False
     
     def _get_health_data(self) -> Dict[str, Any]:
         """Get bridge health data."""
