@@ -43,6 +43,7 @@ MQTT_TOPICS = {
     'bridge_availability': 'utec/bridge/availability',
     'bridge_health': 'utec/bridge/health',
     'bridge_command': 'utec/bridge/command',
+    'lock_availability': 'utec/{device_id}/availability',
     'lock_state': 'utec/{device_id}/lock/state',
     'lock_command': 'utec/{device_id}/lock/command',
     'battery_state': 'utec/{device_id}/battery/state',

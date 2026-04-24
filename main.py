@@ -53,17 +53,20 @@ logger = logging.getLogger(__name__)
 class UtecHaBridge:
     """U-tec to Home Assistant bridge with monitoring and control."""
     
-    def __init__(self, utec_email: str, utec_password: str, mqtt_host: str, 
-                 mqtt_port: int = 1883, mqtt_username: Optional[str] = None, 
+    def __init__(self, utec_email: str, utec_password: str, mqtt_host: str,
+                 mqtt_port: int = 1883, mqtt_username: Optional[str] = None,
                  mqtt_password: Optional[str] = None, update_interval: int = 300,
+                 unavailable_after_failures: int = 2,
                  dry_run: bool = False):
         """Initialize the bridge with required parameters."""
         self.utec_email = utec_email
         self.utec_password = utec_password
         self.update_interval = update_interval
+        self.unavailable_after_failures = unavailable_after_failures
         self.running = True
         self.locks: List = []
         self.device_map: Dict[str, Any] = {}
+        self.consecutive_failures: Dict[str, int] = {}
         self.start_time = time.time()
         self.last_successful_update = 0
         self.dry_run = dry_run
@@ -148,7 +151,11 @@ class UtecHaBridge:
                 if not self.mqtt_client.setup_lock_discovery(lock):
                     logger.error(f"Failed to set up discovery for {lock.name}")
                     continue
-                
+
+                # Mark available up-front so HA doesn't inherit a stale 'offline'
+                # from a previous session's retained availability message.
+                self.mqtt_client.publish_availability(lock, available=True)
+
                 # Get initial status and publish
                 await self._update_lock_status(lock)
                 self.mqtt_client.update_lock_state(lock)
@@ -363,18 +370,44 @@ class UtecHaBridge:
             logger.warning(f"Updated {successful_updates}/{active_locks} active locks (total: {total_locks})")
 
     async def _update_single_lock_with_publish(self, lock) -> bool:
-        """Update a single lock and publish its state."""
+        """Update a single lock, publish its state, and track per-lock availability.
+
+        After ``unavailable_after_failures`` consecutive failed BLE polls, we
+        publish 'offline' to the lock's availability topic so HA stops
+        displaying a potentially-stale lock state. Recovery publishes 'online'
+        before the fresh state so HA processes availability first.
+        """
+        device_id = lock.mac_uuid.replace(":", "_").lower()
         try:
             await lock.async_update_status()
             logger.debug(f"Updated status for {lock.name}")
+
+            # Recovery: if we were previously marked offline, bring the lock
+            # back online before publishing fresh state.
+            prior_failures = self.consecutive_failures.get(device_id, 0)
+            if prior_failures >= self.unavailable_after_failures:
+                logger.info(
+                    f"[{lock.name}] Recovered after {prior_failures} consecutive failures; marking online")
+                self.mqtt_client.publish_availability(lock, available=True)
+            self.consecutive_failures[device_id] = 0
+
             if self.mqtt_client.update_lock_state(lock):
                 return True
             else:
                 logger.warning(f"Failed to publish state for {lock.name}")
                 return False
         except Exception as e:
-            logger.error(f"Failed to update {lock.name}: {e}")
-            raise
+            count = self.consecutive_failures.get(device_id, 0) + 1
+            self.consecutive_failures[device_id] = count
+            logger.error(
+                f"Failed to update {lock.name} (consecutive failure {count}/{self.unavailable_after_failures}): {e}")
+            # Publish 'offline' exactly when we cross the threshold. Subsequent
+            # failures leave the retained 'offline' message in place.
+            if count == self.unavailable_after_failures:
+                logger.warning(
+                    f"[{lock.name}] Threshold reached; marking Unavailable in HA to avoid publishing stale state")
+                self.mqtt_client.publish_availability(lock, available=False)
+            return False
     
     def _get_health_data(self) -> Dict[str, Any]:
         """Get bridge health data."""
@@ -638,7 +671,8 @@ def load_config(config_file: Optional[str] = None, cli_overrides: Optional[Dict[
     mqtt_username = os.getenv('MQTT_USERNAME')
     mqtt_password = os.getenv('MQTT_PASSWORD')
     update_interval = int(os.getenv('UPDATE_INTERVAL', '300'))
-    
+    unavailable_after_failures = int(os.getenv('UNAVAILABLE_AFTER_FAILURES', '2'))
+
     config = {
         'utec_email': utec_email,
         'utec_password': utec_password,
@@ -646,7 +680,8 @@ def load_config(config_file: Optional[str] = None, cli_overrides: Optional[Dict[
         'mqtt_port': mqtt_port,
         'mqtt_username': mqtt_username,
         'mqtt_password': mqtt_password,
-        'update_interval': update_interval
+        'update_interval': update_interval,
+        'unavailable_after_failures': unavailable_after_failures,
     }
     
     # Log final configuration (without sensitive data)

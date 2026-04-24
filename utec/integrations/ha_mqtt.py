@@ -368,14 +368,23 @@ class UtecMQTTClient:
         if not self.connected:
             logger.error("Cannot setup discovery: not connected")
             return False
-        
+
         device_id = self._get_device_id(lock)
         device_name = self._get_device_name(lock)
         device_info = self._create_device_info(lock)
-        
+
+        # All entities for this lock share availability on both the bridge LWT
+        # topic and a per-lock topic. availability_mode=all means either going
+        # offline flips the entity to Unavailable in HA.
+        availability = [
+            {"topic": MQTT_TOPICS['bridge_availability']},
+            {"topic": MQTT_TOPICS['lock_availability'].format(device_id=device_id)},
+        ]
+        availability_mode = "all"
+
         # Subscribe to commands for this device
         self.subscribe_to_device_commands(device_id)
-        
+
         # Discovery configurations for U-tec lock (use constants for base config)
         discoveries = [
             # Main lock entity
@@ -387,9 +396,11 @@ class UtecMQTTClient:
                 "state_topic": MQTT_TOPICS['lock_state'].format(device_id=device_id),
                 "command_topic": MQTT_TOPICS['lock_command'].format(device_id=device_id),
                 "qos": self.qos,
+                "availability": availability,
+                "availability_mode": availability_mode,
                 **HA_LOCK_DISCOVERY_CONFIG['lock']
             }),
-            
+
             # Battery sensor
             ("sensor", f"{device_id}_battery", {
                 "name": f"{device_name} Battery",
@@ -397,40 +408,48 @@ class UtecMQTTClient:
                 "default_entity_id": f"sensor.{device_id}_battery",
                 "device": device_info,
                 "state_topic": MQTT_TOPICS['battery_state'].format(device_id=device_id),
+                "availability": availability,
+                "availability_mode": availability_mode,
                 **HA_LOCK_DISCOVERY_CONFIG['battery']
             }),
-            
-            # Lock mode sensor  
+
+            # Lock mode sensor
             ("sensor", f"{device_id}_lock_mode", {
                 "name": f"{device_name} Lock Mode",
                 "unique_id": f"{device_id}_lock_mode",
                 "default_entity_id": f"sensor.{device_id}_lock_mode",
                 "device": device_info,
                 "state_topic": MQTT_TOPICS['lock_mode_state'].format(device_id=device_id),
+                "availability": availability,
+                "availability_mode": availability_mode,
                 **HA_LOCK_DISCOVERY_CONFIG['lock_mode']
             }),
-            
+
             # Autolock time sensor
             ("sensor", f"{device_id}_autolock", {
-                "name": f"{device_name} Autolock Time", 
+                "name": f"{device_name} Autolock Time",
                 "unique_id": f"{device_id}_autolock",
                 "default_entity_id": f"sensor.{device_id}_autolock",
                 "device": device_info,
                 "state_topic": MQTT_TOPICS['autolock_state'].format(device_id=device_id),
+                "availability": availability,
+                "availability_mode": availability_mode,
                 **HA_LOCK_DISCOVERY_CONFIG['autolock']
             }),
-            
+
             # Mute status sensor
             ("binary_sensor", f"{device_id}_mute", {
                 "name": f"{device_name} Mute",
                 "unique_id": f"{device_id}_mute",
-                "default_entity_id": f"binary_sensor.{device_id}_mute", 
+                "default_entity_id": f"binary_sensor.{device_id}_mute",
                 "device": device_info,
                 "state_topic": MQTT_TOPICS['mute_state'].format(device_id=device_id),
+                "availability": availability,
+                "availability_mode": availability_mode,
                 **HA_LOCK_DISCOVERY_CONFIG['mute']
             })
         ]
-        
+
         # Add signal strength sensor if available (use constants)
         if hasattr(lock, 'rssi') or hasattr(lock, 'signal_strength'):
             discoveries.append(("sensor", f"{device_id}_signal", {
@@ -439,9 +458,11 @@ class UtecMQTTClient:
                 "default_entity_id": f"sensor.{device_id}_signal",
                 "device": device_info,
                 "state_topic": MQTT_TOPICS['signal_state'].format(device_id=device_id),
+                "availability": availability,
+                "availability_mode": availability_mode,
                 **HA_LOCK_DISCOVERY_CONFIG['signal']
             }))
-        
+
         # Publish all discovery configurations
         success = True
         for component, object_id, config in discoveries:
@@ -449,11 +470,22 @@ class UtecMQTTClient:
             if not self.publish(topic, config, retain=True):
                 success = False
                 logger.error(f"Failed to publish discovery for {object_id}")
-        
+
         if success:
             logger.info(f"Set up Home Assistant discovery for {device_name}")
-        
+
         return success
+
+    def publish_availability(self, lock, available: bool) -> bool:
+        """Publish per-lock availability so HA can flip the entity to Unavailable."""
+        if not self.connected:
+            logger.error("Cannot publish availability: not connected")
+            return False
+        device_id = self._get_device_id(lock)
+        topic = MQTT_TOPICS['lock_availability'].format(device_id=device_id)
+        payload = "online" if available else "offline"
+        logger.info(f"[{self._get_device_name(lock)}] Publishing availability: {payload}")
+        return self.publish(topic, payload, qos=1, retain=True)
     
     def update_lock_state(self, lock) -> bool:
         """Update U-tec lock state in Home Assistant."""
@@ -547,7 +579,12 @@ class UtecMQTTClient:
             topic = f"{self.discovery_prefix}/{component}/{object_id}/config"
             if not self.publish(topic, ""):  # Empty payload removes device
                 success = False
-        
+
+        # Clear the retained per-lock availability message
+        availability_topic = MQTT_TOPICS['lock_availability'].format(device_id=device_id)
+        if not self.publish(availability_topic, "", retain=True):
+            success = False
+
         if success:
             logger.info(f"Removed device {self._get_device_name(lock)} from Home Assistant")
         
