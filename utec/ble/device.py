@@ -916,8 +916,9 @@ class UtecBleResponse:
                 logger.info(f"[{self.device.mac_uuid}] Battery level: {self.device.battery} ({BATTERY_LEVEL[self.device.battery]})")
 
             elif self.command == BleResponseCode.GET_AUTOLOCK:
-                self.device.autolock_time = bytes_to_int2(self.data[:2])
-                logger.info(f"[{self.device.mac_uuid}] Autolock time: {self.device.autolock_time}s")
+                if self.success:
+                    self.device.autolock_time = bytes_to_int2(self.data[:2])
+                    logger.info(f"[{self.device.mac_uuid}] Autolock time: {self.device.autolock_time}s")
 
             elif self.command == BleResponseCode.SET_AUTOLOCK:
                 if self.success:
