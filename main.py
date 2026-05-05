@@ -75,13 +75,16 @@ class UtecHaBridge:
         if self.dry_run:
             logger.warning("DRY RUN MODE - No actual lock commands will be executed!")
         
-        # Initialize single MQTT client with command handling
+        # Initialize single MQTT client with command handling.
+        # bridge_id distinguishes this Pi's LWT topic from any sibling Pi's;
+        # if not set explicitly via env, the client falls back to hostname.
         self.mqtt_client = UtecMQTTClient(
             broker_host=mqtt_host,
             broker_port=mqtt_port,
             username=mqtt_username,
             password=mqtt_password,
-            command_handler=self._process_command  # Direct async handler
+            command_handler=self._process_command,  # Direct async handler
+            bridge_id=os.getenv('BRIDGE_ID', '').strip() or None,
         )
         
         logger.info(f"Bridge initialized (update interval: {update_interval}s, dry_run: {dry_run})")

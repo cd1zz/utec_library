@@ -5,6 +5,8 @@ Follows KISS, YAGNI, and SOLID principles.
 
 import json
 import logging
+import re
+import socket
 import time
 import asyncio
 from typing import Dict, Any, Optional, Callable, List
@@ -20,9 +22,10 @@ logger = logging.getLogger(__name__)
 class UtecMQTTClient:
     """Enhanced MQTT client for U-tec locks with bidirectional communication."""
     
-    def __init__(self, broker_host: str, broker_port: int = 1883, 
+    def __init__(self, broker_host: str, broker_port: int = 1883,
                  username: Optional[str] = None, password: Optional[str] = None,
-                 command_handler: Optional[Callable] = None, event_loop: Optional[asyncio.AbstractEventLoop] = None):
+                 command_handler: Optional[Callable] = None, event_loop: Optional[asyncio.AbstractEventLoop] = None,
+                 bridge_id: Optional[str] = None):
         """Initialize MQTT client with optional command handling."""
         self.broker_host = broker_host
         self.broker_port = broker_port
@@ -30,12 +33,19 @@ class UtecMQTTClient:
         self.password = password
         self.command_handler = command_handler
         self.event_loop = event_loop  # Store reference to main event loop
-        
+
+        # Each Pi gets its own bridge_id so its LWT topic is distinct from
+        # any sibling bridge's. Default falls back to hostname if caller
+        # didn't supply one.
+        raw_bridge_id = bridge_id or socket.gethostname() or "bridge"
+        self.bridge_id = re.sub(r'[^a-z0-9_]', '_', raw_bridge_id.lower()).strip('_') or "bridge"
+        self.bridge_availability_topic = MQTT_TOPICS['bridge_availability'].format(bridge_id=self.bridge_id)
+
         # MQTT settings
         self.keepalive = 60
         self.qos = 1
         self.retain = False
-        
+
         # Topic configuration (use constants)
         self.discovery_prefix = MQTT_TOPICS['discovery_prefix']
         self.device_prefix = MQTT_TOPICS['device_prefix']
@@ -110,9 +120,9 @@ class UtecMQTTClient:
         except (ImportError, TypeError):
             client = mqtt.Client(client_id=client_id)
 
-        # Set Last Will and Testament (use constants)
+        # Set Last Will and Testament on the per-bridge availability topic
         client.will_set(
-            MQTT_TOPICS['bridge_availability'],
+            self.bridge_availability_topic,
             "offline",
             qos=1,
             retain=True
@@ -139,8 +149,8 @@ class UtecMQTTClient:
             self.connected = True
             logger.info("Connected to MQTT broker")
             
-            # Publish availability immediately (use constants)
-            self.publish(MQTT_TOPICS['bridge_availability'], "online", retain=True)
+            # Publish availability immediately on the per-bridge topic
+            self.publish(self.bridge_availability_topic, "online", retain=True)
             
             # Resubscribe to all topics
             self._resubscribe_all()
@@ -342,19 +352,21 @@ class UtecMQTTClient:
                 success = False
                 logger.error(f"Failed to publish discovery for {sensor['name']}")
         
-        # Binary sensor for connectivity (use constants)
+        # Binary sensor for connectivity — per-bridge so two Pis don't
+        # collide on a single shared entity.
+        binary_sensor_uid = f"utec_bridge_{self.bridge_id}_online"
         binary_sensor = {
-            "name": "Utec Bridge Online",
-            "default_entity_id": "binary_sensor.utec_bridge_online",
-            "state_topic": MQTT_TOPICS['bridge_availability'],
+            "name": f"Utec Bridge {self.bridge_id} Online",
+            "default_entity_id": f"binary_sensor.{binary_sensor_uid}",
+            "state_topic": self.bridge_availability_topic,
             "payload_on": "online",
-            "payload_off": "offline", 
+            "payload_off": "offline",
             "device_class": "connectivity",
             "device": device_info,
-            "unique_id": "utec_bridge_online"
+            "unique_id": binary_sensor_uid
         }
-        
-        discovery_topic = f"{self.discovery_prefix}/binary_sensor/utec_bridge/utec_bridge_online/config"
+
+        discovery_topic = f"{self.discovery_prefix}/binary_sensor/utec_bridge/{binary_sensor_uid}/config"
         if not self.publish(discovery_topic, binary_sensor, retain=True):
             success = False
         
@@ -373,11 +385,13 @@ class UtecMQTTClient:
         device_name = self._get_device_name(lock)
         device_info = self._create_device_info(lock)
 
-        # All entities for this lock share availability on both the bridge LWT
-        # topic and a per-lock topic. availability_mode=all means either going
-        # offline flips the entity to Unavailable in HA.
+        # All entities for this lock share availability on both this Pi's
+        # bridge LWT topic and a per-lock topic. availability_mode=all means
+        # either going offline flips the entity to Unavailable in HA.
+        # Using the per-Pi LWT topic (not a shared one) keeps a sibling Pi's
+        # death from marking this Pi's locks unavailable.
         availability = [
-            {"topic": MQTT_TOPICS['bridge_availability']},
+            {"topic": self.bridge_availability_topic},
             {"topic": MQTT_TOPICS['lock_availability'].format(device_id=device_id)},
         ]
         availability_mode = "all"
@@ -595,8 +609,8 @@ class UtecMQTTClient:
         if self.client and self.connected:
             logger.info("Disconnecting from MQTT broker")
 
-            # Publish offline status before disconnecting (use constants)
-            self.publish(MQTT_TOPICS['bridge_availability'], "offline", retain=True)
+            # Publish offline status on the per-bridge topic before disconnecting
+            self.publish(self.bridge_availability_topic, "offline", retain=True)
 
             # Unsubscribe from all device command topics
             for topic in list(self.device_subscriptions):

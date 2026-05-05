@@ -37,10 +37,13 @@ HA_DEVICE_CLASSES = {
 }
 
 # MQTT topics structure
+# bridge_availability is templated with {bridge_id} so each Pi has its own
+# LWT topic; otherwise one Pi's death-via-LWT overwrites the retained
+# "online" of the surviving Pi and marks every lock unavailable in HA.
 MQTT_TOPICS = {
     'discovery_prefix': 'homeassistant',
     'device_prefix': 'utec',
-    'bridge_availability': 'utec/bridge/availability',
+    'bridge_availability': 'utec/bridge/{bridge_id}/availability',
     'bridge_health': 'utec/bridge/health',
     'bridge_command': 'utec/bridge/command',
     'lock_availability': 'utec/{device_id}/availability',
