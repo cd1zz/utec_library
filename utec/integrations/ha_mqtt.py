@@ -108,7 +108,8 @@ class UtecMQTTClient:
     
     def _create_client(self) -> mqtt.Client:
         """Create and configure MQTT client."""
-        client_id = f"utec-ha-{int(time.time())}"
+        # Stable id so a Pi reboot takes over the prior session instead of leaving it to time out and fire its LWT after the new "online" publish.
+        client_id = f"utec-ha-{self.bridge_id}"
 
         # Handle paho-mqtt version differences
         try:
