@@ -999,7 +999,11 @@ class UtecBleDeviceKey:
             method = "static"
             logger.info(f"[{mac_uuid}] Using static key encryption")
             key_data = await client.read_gatt_char(DeviceKeyUUID.STATIC.value)
-            result = bytearray(b"Anviz.ut") + key_data
+            # Match the app: key = device_bytes[0:8] + "Anviz.ut" (16 bytes total).
+            # The Anviz lib (Helper.doReadNormalKey) copies the read value into a
+            # 16-byte buffer then overwrites bytes [8:16] with "Anviz.ut", so only
+            # the first 8 device bytes are used and the fixed tag comes last.
+            result = bytearray(key_data[:8]) + b"Anviz.ut"
             logger.debug(f"[{mac_uuid}] Static key generated ({len(result)} bytes)")
 
         elif md5_char:
