@@ -27,6 +27,30 @@ from utec.integrations.ha_constants import MQTT_TOPICS
 from utec.ble.background_scanner import BleBackgroundScanner, set_background_scanner
 from utec.config import config
 
+# Optional per-bridge BLE tuning from the environment (.env). Lets an individual
+# Pi adjust scan/discovery behavior for weak-signal locks without a code change;
+# absent vars keep the in-code defaults. Applied to the singleton at import time,
+# before the background scanner starts and reads these values.
+def _apply_ble_env_overrides() -> None:
+    overrides: Dict[str, Any] = {}
+
+    passive = os.getenv("BLE_SCAN_PASSIVE", "").strip().lower()
+    if passive:
+        overrides["ble_scan_passive"] = passive in ("1", "true", "yes", "on")
+
+    timeout = os.getenv("BLE_DEVICE_TIMEOUT", "").strip()
+    if timeout:
+        try:
+            overrides["ble_device_timeout"] = float(timeout)
+        except ValueError:
+            pass
+
+    if overrides:
+        config.configure(**overrides)
+
+
+_apply_ble_env_overrides()
+
 # Configure logging
 if os.name == 'nt':  # Windows
     logging.basicConfig(
