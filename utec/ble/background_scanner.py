@@ -116,10 +116,16 @@ class BleBackgroundScanner:
         # No service_uuids filter — some U-tec locks only advertise manufacturer
         # data (0x0969) or device name, not the lock service UUID.
         # Device validation happens in _is_utec_lock() instead.
-        self._scanner = BleakScanner(
-            detection_callback=self._detection_callback,
-            scanning_mode="passive" if config.ble_scan_passive else "active",
-        )
+        # BlueZ requires an advertisement-monitor or_patterns filter for passive
+        # scanning; without it Bleak raises "passive scanning mode requires bluez
+        # or_patterns". Only pass it in passive mode (active mode rejects it).
+        scanner_kwargs: Dict[str, Any] = {
+            "detection_callback": self._detection_callback,
+            "scanning_mode": "passive" if config.ble_scan_passive else "active",
+        }
+        if config.ble_scan_passive:
+            scanner_kwargs["bluez"] = PASSIVE_SCANNER_ARGS
+        self._scanner = BleakScanner(**scanner_kwargs)
 
         try:
             await self._scanner.start()
